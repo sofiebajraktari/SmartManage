@@ -53,6 +53,8 @@ const iconKpiAlert = `<svg class="h-4 w-4" fill="none" stroke="currentColor" vie
 const iconKpiProducts = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10" /></svg>`
 const iconSearch = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 117.5-7.5 7.5 7.5 0 01-7.5 7.5z" /></svg>`
 const iconMenu = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>`
+const iconChevronDown = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>`
+const iconChevronUp = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" /></svg>`
 const SUPPLIER_PHONE_STORAGE_KEY = 'smartmanage_supplier_phones'
 const SHORTAGE_SORT_STORAGE_KEY = 'smartmanage-owner-shortage-sort'
 const COMPANY_DETAILS_CACHE_KEY = 'smartmanage-company-details-cache-v1'
@@ -328,6 +330,7 @@ export function renderPronari(
   let teamLoading = false
   let searchQuery = ''
   let sortBy: 'supplier' | 'name' = readStoredShortageSort()
+  let expandedShortageIds = new Set<string>()
   let generatedOrders: OwnerOrder[] = []
   let allOrders: OwnerOrder[] = []
   let showAllOrders = false
@@ -1755,6 +1758,42 @@ export function renderPronari(
     return rows
   }
 
+  function getShortageRiskTone(level?: ShortageView['aiRiskLevel']): string {
+    if (level === 'HIGH') return 'owner-ai-pill-high'
+    if (level === 'MEDIUM') return 'owner-ai-pill-medium'
+    return 'owner-ai-pill-low'
+  }
+
+  function getShortageRiskLabel(level?: ShortageView['aiRiskLevel']): string {
+    if (level === 'HIGH') return 'AI: Rrezik i larte'
+    if (level === 'MEDIUM') return 'AI: Rrezik mesatar'
+    return 'AI: Rrezik i ulet'
+  }
+
+  function getShortageSignalLabel(count: number): string {
+    const safeCount = Math.max(1, Math.floor(Number(count) || 1))
+    return safeCount === 1 ? '1 sinjal sot' : `${safeCount} sinjale sot`
+  }
+
+  function getProductMonogram(name: string): string {
+    const clean = name.replace(/[^A-Za-z0-9]+/g, ' ').trim()
+    const parts = clean.split(/\s+/).filter(Boolean)
+    const first = parts[0]?.charAt(0) ?? clean.charAt(0) ?? 'P'
+    const second = parts[1]?.charAt(0) ?? parts[0]?.charAt(1) ?? clean.charAt(1) ?? ''
+    return `${first}${second}`.toUpperCase()
+  }
+
+  function getShortageAiSummary(shortage: ShortageView): string[] {
+    const parts: string[] = []
+    if (shortage.aiOrderPriority) parts.push(`Prioritet ${shortage.aiOrderPriority}`)
+    if (shortage.aiCoverageDays != null) parts.push(`Mbulim ${shortage.aiCoverageDays.toFixed(1)}d`)
+    else if (shortage.leadTimeDays != null) parts.push(`Lead ${shortage.leadTimeDays}d`)
+    if (!parts.length && shortage.aiEstimatedCost != null) {
+      parts.push(`Kosto ~${shortage.aiEstimatedCost.toFixed(2)} EUR`)
+    }
+    return parts
+  }
+
   function buildReceipt(order: OwnerOrder): string {
     return formatOwnerOrderReceipt(order)
     const date = new Date().toLocaleString('sq-AL')
@@ -1970,13 +2009,122 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
   function renderShortagesBody(): string {
     const rows = getFilteredRows()
     if (!rows.length) {
-      return `<tr><td colspan="5" class="px-3 py-8 text-center">
+      return `<div class="p-3">
         <div class="premium-empty">
           <div class="premium-empty-title">Nuk ka rezultate për këtë kërkim</div>
           <p class="premium-empty-copy">Provo me një emër tjetër ose ndrysho renditjen.</p>
         </div>
-      </td></tr>`
+      </div>`
     }
+    return rows
+      .map((s) => {
+        const isExpanded = expandedShortageIds.has(s.id)
+        const topAlternative = getSupplierAlternativeRecommendations(s, 1)[0]
+        const recommendationCopy = topAlternative
+          ? `AI sugjeron ${topAlternative.supplierName}: ${topAlternative.reasons.join(', ')}`
+          : ''
+        const qtyMeta = [
+          s.aiSuggestedQty != null ? `<span class="owner-shortage-mini-pill">AI ${s.aiSuggestedQty}</span>` : '',
+          s.aiConfidence != null ? `<span>Besim ${s.aiConfidence}%</span>` : '',
+        ]
+          .filter(Boolean)
+          .join('')
+        const aiSummary = getShortageAiSummary(s)
+        const createdByText = s.createdByLabel
+          ? `Raportuar nga ${s.createdByLabel}${s.createdByRole ? ` (${s.createdByRole})` : ''}.`
+          : 'Raportuar nga sistemi.'
+        return `
+      <article class="owner-shortage-card">
+        <div class="owner-shortage-summary">
+          <div class="owner-shortage-cell owner-shortage-product-cell" data-owner-label="Produkti">
+            <div class="owner-shortage-product-wrap">
+              <div class="owner-product-badge h-9 w-9 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center text-[10px] font-semibold text-blue-700">
+                ${getProductMonogram(s.productName)}
+              </div>
+              <div class="min-w-0">
+                <div class="owner-shortage-name">${s.productName}</div>
+                <div class="owner-shortage-subline">${s.supplierName}</div>
+              </div>
+            </div>
+          </div>
+          <div class="owner-shortage-cell owner-shortage-qty-cell" data-owner-label="Sasia">
+            <div class="owner-shortage-qty-stack">
+              <div class="owner-qty-pill inline-flex items-center rounded-full border border-slate-300 bg-white px-2 py-1 gap-1">
+                <button data-action="decrement" data-id="${s.id}" class="owner-qty-btn text-slate-600 text-xs px-1 hover:text-slate-900">-</button>
+                <span class="owner-qty-value w-6 text-center text-slate-800 text-xs">${s.suggestedQty}</span>
+                <button data-action="increment" data-id="${s.id}" class="owner-qty-btn text-slate-600 text-xs px-1 hover:text-slate-900">+</button>
+              </div>
+              <div class="owner-shortage-caption">
+                ${qtyMeta || '<span>Pa sinjal AI shtese</span>'}
+              </div>
+            </div>
+          </div>
+          <div class="owner-shortage-cell owner-shortage-status-cell" data-owner-label="Statusi">
+            <span class="owner-status-pill rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
+              s.urgent
+                ? 'owner-status-urgent bg-red-100 text-red-700 border-red-200'
+                : 'owner-status-normal bg-slate-100 text-slate-600 border-slate-200'
+            }">
+              ${s.urgent ? 'URGJENT' : 'Normal'}
+            </span>
+            <span class="owner-shortage-caption">${getShortageSignalLabel(s.addedCount)}</span>
+          </div>
+          <div class="owner-shortage-cell owner-shortage-ai-cell" data-owner-label="AI">
+            <span class="owner-ai-pill ${getShortageRiskTone(s.aiRiskLevel)}">${getShortageRiskLabel(s.aiRiskLevel)}</span>
+            <span class="owner-shortage-caption">${aiSummary[0] ?? 'Pa sinjal shtese'}</span>
+            ${aiSummary[1] ? `<span class="owner-shortage-caption owner-shortage-caption-secondary">${aiSummary[1]}</span>` : ''}
+          </div>
+          <div class="owner-shortage-cell owner-shortage-actions-cell" data-owner-label="Veprime">
+            <div class="owner-shortage-actions">
+              <button data-action="copy-shortage-name" data-id="${s.id}" title="Kopjo detajet" class="ui-icon-btn">${iconCopy}</button>
+              <button data-action="reassign-supplier" data-id="${s.id}" title="Ndrysho furnitorin" class="ui-icon-btn">${iconMenu}</button>
+              <button data-action="edit-note" data-id="${s.id}" title="Ndrysho mungesen" class="ui-icon-btn">${iconEdit}</button>
+              <button data-action="delete-shortage" data-id="${s.id}" title="Fshi mungesen" class="ui-icon-btn">${iconTrash}</button>
+              <button
+                data-action="toggle-shortage-details"
+                data-id="${s.id}"
+                aria-expanded="${isExpanded ? 'true' : 'false'}"
+                title="${isExpanded ? 'Mbyll detajet' : 'Shfaq detajet'}"
+                class="ui-icon-btn owner-shortage-toggle-btn ${isExpanded ? 'owner-shortage-toggle-btn-open' : ''}"
+              >
+                ${isExpanded ? iconChevronUp : iconChevronDown}
+              </button>
+            </div>
+          </div>
+        </div>
+        ${
+          isExpanded
+            ? `
+        <div class="owner-shortage-details">
+          <div class="owner-shortage-details-grid">
+            <section class="owner-shortage-detail-block">
+              <p class="owner-shortage-detail-label">Shenim</p>
+              <p class="owner-shortage-detail-copy ${s.note ? '' : 'owner-shortage-detail-muted'}">${s.note || 'Pa shenim manual.'}</p>
+              <p class="owner-shortage-detail-meta">${createdByText}</p>
+            </section>
+            <section class="owner-shortage-detail-block">
+              <p class="owner-shortage-detail-label">AI</p>
+              <p class="owner-shortage-detail-copy ${s.aiReason ? '' : 'owner-shortage-detail-muted'}">${s.aiReason || 'AI ende nuk ka shpjegim te plote per kete mungese.'}</p>
+              ${s.aiOrderAction ? `<p class="owner-shortage-detail-meta owner-shortage-detail-meta-accent">Ri-porosi: ${s.aiOrderAction}</p>` : ''}
+              ${s.aiEstimatedCost != null ? `<p class="owner-shortage-detail-meta">Kosto e pritshme ~${s.aiEstimatedCost.toFixed(2)} EUR</p>` : ''}
+            </section>
+            <section class="owner-shortage-detail-block">
+              <p class="owner-shortage-detail-label">Furnitori</p>
+              <p class="owner-shortage-detail-copy">${s.supplierName}</p>
+              ${
+                topAlternative
+                  ? `<span class="owner-shortage-alt">AI alt: ${topAlternative.supplierName}</span>
+                     <p class="owner-shortage-detail-meta">${recommendationCopy}</p>`
+                  : '<p class="owner-shortage-detail-meta">Nuk ka alternative te qarte tani.</p>'
+              }
+            </section>
+          </div>
+        </div>`
+            : ''
+        }
+      </article>`
+      })
+      .join('')
     return rows
       .map(
         (s) => {
@@ -3155,6 +3303,9 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     const dashboardPanel = document.getElementById('owner-dashboard-panel')
     const teamPanel = document.getElementById('owner-team-panel')
     const companyPanel = document.getElementById('owner-company-panel')
+    expandedShortageIds = new Set(
+      [...expandedShortageIds].filter((id) => shortages.some((shortage) => shortage.id === id))
+    )
     if (tableBody) tableBody.innerHTML = renderShortagesBody()
     if (ordersList) ordersList.innerHTML = renderOrdersPanel()
     if (importPreview) importPreview.innerHTML = renderImportPreview()
@@ -3538,7 +3689,15 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
             </form>
             <div id="owner-shortage-suggestions" class="mb-3"></div>
             <div class="owner-shortages-table-wrap overflow-hidden rounded-xl border border-slate-200 bg-white">
-              <table class="min-w-full text-xs">
+              <div class="owner-shortage-head">
+                <span>Produkti</span>
+                <span>Sasia</span>
+                <span>Statusi</span>
+                <span>AI</span>
+                <span class="text-right">Veprime</span>
+              </div>
+              <div id="owner-shortage-body" class="owner-shortage-list">${renderShortagesBody()}</div>
+              <table class="min-w-full text-xs" style="display:none">
                 <thead class="ui-table-head bg-slate-100 text-slate-700">
                   <tr>
                     <th class="px-3 py-2 text-left font-medium">Barna</th>
@@ -3548,7 +3707,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                     <th class="px-3 py-2 text-right font-medium">Veprime</th>
                   </tr>
                 </thead>
-                <tbody id="owner-shortage-body">${renderShortagesBody()}</tbody>
+                <tbody id="owner-shortage-body-legacy"></tbody>
               </table>
             </div>
             <p class="mt-2 text-[11px] text-slate-500 flex items-center gap-1">
@@ -4818,6 +4977,15 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
         s.id === id ? { ...s, suggestedQty: Math.max(1, s.suggestedQty - 1) } : s
       )
       persistSuggestedQtyDraft(shortages)
+      refreshUI()
+      return
+    }
+
+    if (action === 'toggle-shortage-details' && id) {
+      const nextExpanded = new Set(expandedShortageIds)
+      if (nextExpanded.has(id)) nextExpanded.delete(id)
+      else nextExpanded.add(id)
+      expandedShortageIds = nextExpanded
       refreshUI()
       return
     }
