@@ -45,6 +45,32 @@ export interface AiOverview {
   topRiskProducts: AiPriorityProduct[]
 }
 
+export interface SupplierRecommendationProduct {
+  id: string
+  name: string
+  supplierId?: string
+  supplierName: string
+  category: 'barna' | 'front'
+  aliases: string[]
+  genericName?: string
+  unitPrice?: number
+  leadTimeDays?: number
+  minOrderQty?: number
+  offerPriority?: number
+  isActiveOffer?: boolean
+}
+
+export interface SupplierAlternativeRecommendation {
+  productId: string
+  supplierId?: string
+  supplierName: string
+  productName: string
+  score: number
+  matchScore: number
+  label: 'PREFERRED' | 'FASTEST' | 'BEST_VALUE' | 'BEST_MATCH'
+  reasons: string[]
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -63,6 +89,32 @@ function stdDev(values: number[]): number {
   const avg = mean(values)
   const variance = mean(values.map((value) => (value - avg) ** 2))
   return Math.sqrt(variance)
+}
+
+function normalizeText(value: string): string {
+  return value.trim().toLocaleLowerCase('sq-AL')
+}
+
+function tokenizeText(value: string): string[] {
+  return normalizeText(value)
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+}
+
+function uniqueTokens(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))]
+}
+
+function jaccardSimilarity(a: string[], b: string[]): number {
+  const setA = new Set(a)
+  const setB = new Set(b)
+  if (!setA.size || !setB.size) return 0
+  let intersection = 0
+  setA.forEach((value) => {
+    if (setB.has(value)) intersection += 1
+  })
+  const union = new Set([...setA, ...setB]).size
+  return union > 0 ? intersection / union : 0
 }
 
 function weightedMean(values: number[]): number {
@@ -102,6 +154,41 @@ function buildReason(input: {
   if (parts.length === 0 && input.forecastPerDay >= 1) parts.push('kerkese e qendrueshme')
   if (parts.length === 0) parts.push('presion i ulet mbi stokun')
   return parts.slice(0, 2).join(', ')
+}
+
+function normalizeProductKey(product: Pick<SupplierRecommendationProduct, 'name' | 'genericName' | 'aliases'>): {
+  name: string
+  genericName: string
+  aliases: string[]
+  tokens: string[]
+} {
+  const name = normalizeText(product.name)
+  const genericName = normalizeText(product.genericName ?? '')
+  const aliases = uniqueTokens(product.aliases.map((alias) => normalizeText(alias)))
+  const tokens = uniqueTokens([
+    ...tokenizeText(name),
+    ...tokenizeText(genericName),
+    ...aliases.flatMap((alias) => tokenizeText(alias)),
+  ])
+  return { name, genericName, aliases, tokens }
+}
+
+function pickRecommendationLabel(input: {
+  preferred: boolean
+  hasPriceAdvantage: boolean
+  hasLeadAdvantage: boolean
+}): SupplierAlternativeRecommendation['label'] {
+  if (input.preferred) return 'PREFERRED'
+  if (input.hasLeadAdvantage) return 'FASTEST'
+  if (input.hasPriceAdvantage) return 'BEST_VALUE'
+  return 'BEST_MATCH'
+}
+
+function labelReasons(label: SupplierAlternativeRecommendation['label']): string {
+  if (label === 'PREFERRED') return 'furnitor i preferuar'
+  if (label === 'FASTEST') return 'lead time me i shpejte'
+  if (label === 'BEST_VALUE') return 'vlere me e mire ekonomike'
+  return 'pershtatje e forte me produktin'
 }
 
 export function forecastProductDemand(input: AiProductCandidate): AiDemandForecast {
@@ -282,4 +369,115 @@ export function buildAiOverview(products: AiProductCandidate[]): AiOverview {
     action,
     topRiskProducts: topRisk,
   }
+}
+
+export function recommendAlternativeSuppliers(input: {
+  currentProduct: SupplierRecommendationProduct
+  products: SupplierRecommendationProduct[]
+  preferredProductByName?: Record<string, string>
+  limit?: number
+}): SupplierAlternativeRecommendation[] {
+  const current = input.currentProduct
+  const limit = Math.max(1, Math.floor(input.limit ?? 4))
+  const preferredMap = input.preferredProductByName ?? {}
+  const preferredProductId = preferredMap[normalizeText(current.name)] ?? ''
+  const currentNorm = normalizeProductKey(current)
+
+  const alternatives = input.products.filter((candidate) => {
+    if (candidate.id === current.id) return false
+    if (normalizeText(candidate.supplierName) === normalizeText(current.supplierName)) return false
+    if (candidate.category !== current.category) return false
+    return true
+  })
+  if (!alternatives.length) return []
+
+  const priceValues = alternatives
+    .map((candidate) => Number(candidate.unitPrice))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  const leadValues = alternatives
+    .map((candidate) => Number(candidate.leadTimeDays))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  const bestPrice = priceValues.length ? Math.min(...priceValues) : null
+  const bestLead = leadValues.length ? Math.min(...leadValues) : null
+
+  const ranked = alternatives
+    .map((candidate) => {
+      const candidateNorm = normalizeProductKey(candidate)
+      const sameName = currentNorm.name !== '' && currentNorm.name === candidateNorm.name
+      const sameGeneric =
+        currentNorm.genericName !== '' &&
+        candidateNorm.genericName !== '' &&
+        currentNorm.genericName === candidateNorm.genericName
+      const aliasOverlap = jaccardSimilarity(currentNorm.aliases, candidateNorm.aliases)
+      const tokenOverlap = jaccardSimilarity(currentNorm.tokens, candidateNorm.tokens)
+      const matchScore = clamp(
+        Math.round(
+          (sameName ? 62 : 0) +
+            (sameGeneric ? 18 : 0) +
+            aliasOverlap * 14 +
+            tokenOverlap * 24 +
+            (candidate.isActiveOffer === false ? -12 : 4)
+        ),
+        0,
+        100
+      )
+
+      if (matchScore < 28) return null
+
+      const unitPrice = Number(candidate.unitPrice)
+      const leadTimeDays = Number(candidate.leadTimeDays)
+      const minOrderQty = Math.max(1, Number(candidate.minOrderQty ?? 1))
+      const offerPriority = Math.max(0, Number(candidate.offerPriority ?? 100))
+      const preferredBoost = preferredProductId === candidate.id ? 24 : 0
+      const priceBoost =
+        bestPrice && Number.isFinite(unitPrice) && unitPrice > 0
+          ? clamp(Math.round(14 - ((unitPrice - bestPrice) / bestPrice) * 18), 0, 14)
+          : 0
+      const leadBoost =
+        bestLead !== null && Number.isFinite(leadTimeDays) && leadTimeDays >= 0
+          ? clamp(Math.round(12 - (leadTimeDays - bestLead) * 3), 0, 12)
+          : 0
+      const priorityBoost = clamp(Math.round(14 - offerPriority / 8), 0, 14)
+      const minQtyPenalty = clamp((minOrderQty - 1) * 2, 0, 10)
+      const totalScore = clamp(
+        Math.round(matchScore + preferredBoost + priceBoost + leadBoost + priorityBoost - minQtyPenalty),
+        0,
+        100
+      )
+
+      const hasPriceAdvantage = bestPrice !== null && Number.isFinite(unitPrice) && unitPrice === bestPrice
+      const hasLeadAdvantage = bestLead !== null && Number.isFinite(leadTimeDays) && leadTimeDays === bestLead
+      const label = pickRecommendationLabel({
+        preferred: preferredBoost > 0,
+        hasPriceAdvantage,
+        hasLeadAdvantage,
+      })
+      const reasons = [labelReasons(label)]
+      if (sameName) reasons.push('emer identik i produktit')
+      else if (sameGeneric) reasons.push('emer gjenerik i njejte')
+      else if (tokenOverlap >= 0.45) reasons.push('ngjashmeri e larte ne emer/alias')
+      if (hasPriceAdvantage && Number.isFinite(unitPrice)) reasons.push(`cmim ${unitPrice.toFixed(2)}`)
+      if (hasLeadAdvantage && Number.isFinite(leadTimeDays)) reasons.push(`${leadTimeDays} dite lead time`)
+      if (minOrderQty > 1) reasons.push(`MOQ ${minOrderQty}`)
+
+      const recommendation: SupplierAlternativeRecommendation = {
+        productId: candidate.id,
+        supplierId: candidate.supplierId,
+        supplierName: candidate.supplierName,
+        productName: candidate.name,
+        score: totalScore,
+        matchScore,
+        label,
+        reasons: uniqueTokens(reasons),
+      }
+      return recommendation
+    })
+    .filter((candidate): candidate is SupplierAlternativeRecommendation => candidate !== null)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score
+      if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore
+      return a.supplierName.localeCompare(b.supplierName, 'sq-AL')
+    })
+    .slice(0, limit)
+  return ranked
 }

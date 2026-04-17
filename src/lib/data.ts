@@ -37,6 +37,11 @@ export interface ProductView {
   supplierName: string
   category: 'barna' | 'front'
   aliases: string[]
+  unitPrice?: number
+  leadTimeDays?: number
+  minOrderQty?: number
+  offerPriority?: number
+  isActiveOffer?: boolean
 }
 
 export interface ShortageView {
@@ -301,11 +306,16 @@ function fromMockProducts(rows: MockProduct[]): ProductView[] {
   return rows.map((p) => ({
     id: p.id,
     name: p.name,
-    genericName: undefined,
+    genericName: p.genericName ?? undefined,
     defaultOrderQty: 1,
     supplierName: p.supplier,
     category: p.category,
     aliases: p.aliases ?? [],
+    unitPrice: p.unitPrice,
+    leadTimeDays: p.leadTimeDays,
+    minOrderQty: p.minOrderQty,
+    offerPriority: p.offerPriority,
+    isActiveOffer: p.isActiveOffer,
   }))
 }
 
@@ -316,7 +326,7 @@ export async function getProducts(): Promise<ProductView[]> {
 
   const { data, error } = await supabase
     .from('products')
-    .select('id,name,generic_name,default_order_qty,category,aliases,supplier_id,suppliers(name)')
+    .select('id,name,generic_name,default_order_qty,category,aliases,supplier_id,unit_price,lead_time_days,min_order_qty,offer_priority,is_active_offer,suppliers(name)')
     .eq('company_id', companyId)
     .order('name')
 
@@ -331,6 +341,26 @@ export async function getProducts(): Promise<ProductView[]> {
     supplierName: row.suppliers?.name ?? 'Pa furnitor',
     category: row.category === 'front' ? 'front' : 'barna',
     aliases: Array.isArray(row.aliases) ? row.aliases : [],
+    unitPrice: typeof row.unit_price === 'number' ? row.unit_price : row.unit_price != null ? Number(row.unit_price) : undefined,
+    leadTimeDays:
+      typeof row.lead_time_days === 'number'
+        ? row.lead_time_days
+        : row.lead_time_days != null
+          ? Number(row.lead_time_days)
+          : undefined,
+    minOrderQty:
+      typeof row.min_order_qty === 'number'
+        ? row.min_order_qty
+        : row.min_order_qty != null
+          ? Number(row.min_order_qty)
+          : undefined,
+    offerPriority:
+      typeof row.offer_priority === 'number'
+        ? row.offer_priority
+        : row.offer_priority != null
+          ? Number(row.offer_priority)
+          : undefined,
+    isActiveOffer: typeof row.is_active_offer === 'boolean' ? row.is_active_offer : undefined,
   }))
 }
 

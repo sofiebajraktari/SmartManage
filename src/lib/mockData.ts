@@ -5,7 +5,13 @@ export interface MockProduct {
   name: string
   supplier: string
   category: ProductCategory
+  genericName?: string
   aliases?: string[]
+  unitPrice?: number
+  leadTimeDays?: number
+  minOrderQty?: number
+  offerPriority?: number
+  isActiveOffer?: boolean
 }
 
 export interface MissingItem {
@@ -27,10 +33,96 @@ const STORAGE_KEY = 'smartmanage_mock_shortages'
 const PRODUCTS_STORAGE_KEY = 'smartmanage_mock_products'
 
 export const MOCK_PRODUCTS: MockProduct[] = [
-  { id: '1', name: 'AUGMENTIN 1g TAB 14', supplier: 'DONIKA', category: 'barna', aliases: ['augmentin', 'amoksiklav'] },
-  { id: '2', name: 'BRUFEN 400mg TAB 20', supplier: 'ABCOM', category: 'barna', aliases: ['brufen', 'ibuprofen'] },
-  { id: '3', name: 'PARACETAMOL 500mg TAB 10', supplier: 'ABCOM', category: 'barna', aliases: ['paracetamol', 'dafalgan'] },
-  { id: '4', name: 'VITAMIN C 500mg', supplier: 'VITA', category: 'front', aliases: ['vit c'] },
+  {
+    id: '1',
+    name: 'AUGMENTIN 1g TAB 14',
+    supplier: 'DONIKA',
+    category: 'barna',
+    genericName: 'Amoxicillin clavulanic acid',
+    aliases: ['augmentin', 'amoksiklav'],
+    unitPrice: 5.4,
+    leadTimeDays: 1,
+    minOrderQty: 1,
+    offerPriority: 28,
+    isActiveOffer: true,
+  },
+  {
+    id: '2',
+    name: 'AUGMENTIN 1g TAB 14',
+    supplier: 'ABCOM',
+    category: 'barna',
+    genericName: 'Amoxicillin clavulanic acid',
+    aliases: ['augmentin', 'amoksiklav'],
+    unitPrice: 5.1,
+    leadTimeDays: 2,
+    minOrderQty: 2,
+    offerPriority: 34,
+    isActiveOffer: true,
+  },
+  {
+    id: '3',
+    name: 'BRUFEN 400mg TAB 20',
+    supplier: 'ABCOM',
+    category: 'barna',
+    genericName: 'Ibuprofen',
+    aliases: ['brufen', 'ibuprofen'],
+    unitPrice: 2.4,
+    leadTimeDays: 2,
+    minOrderQty: 1,
+    offerPriority: 45,
+    isActiveOffer: true,
+  },
+  {
+    id: '4',
+    name: 'BRUFEN 400mg TAB 20',
+    supplier: 'DONIKA',
+    category: 'barna',
+    genericName: 'Ibuprofen',
+    aliases: ['brufen', 'ibuprofen'],
+    unitPrice: 2.2,
+    leadTimeDays: 1,
+    minOrderQty: 1,
+    offerPriority: 22,
+    isActiveOffer: true,
+  },
+  {
+    id: '5',
+    name: 'PARACETAMOL 500mg TAB 10',
+    supplier: 'ABCOM',
+    category: 'barna',
+    genericName: 'Paracetamol',
+    aliases: ['paracetamol', 'dafalgan'],
+    unitPrice: 1.3,
+    leadTimeDays: 2,
+    minOrderQty: 1,
+    offerPriority: 42,
+    isActiveOffer: true,
+  },
+  {
+    id: '6',
+    name: 'PARACETAMOL 500mg TAB 10',
+    supplier: 'DONIKA',
+    category: 'barna',
+    genericName: 'Paracetamol',
+    aliases: ['paracetamol', 'acetaminophen'],
+    unitPrice: 1.15,
+    leadTimeDays: 1,
+    minOrderQty: 1,
+    offerPriority: 18,
+    isActiveOffer: true,
+  },
+  {
+    id: '7',
+    name: 'VITAMIN C 500mg',
+    supplier: 'VITA',
+    category: 'front',
+    aliases: ['vit c'],
+    unitPrice: 3.2,
+    leadTimeDays: 3,
+    minOrderQty: 1,
+    offerPriority: 60,
+    isActiveOffer: true,
+  },
 ]
 
 function normalize(text: string): string {

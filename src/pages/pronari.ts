@@ -3,6 +3,7 @@ import { getProfile, signOut } from '../lib/auth.js'
 import { isSupabaseConfigured, supabase } from '../lib/supabase.js'
 import { getMockUser } from '../types.js'
 import { rankProductsForWorkerSearch } from '../lib/fuzzyProductSearch.js'
+import { recommendAlternativeSuppliers } from '../lib/inventoryAi.js'
 import {
   addMungese,
   adminCreateUser,
@@ -1163,6 +1164,51 @@ export function renderPronari(
     return value.trim().toLocaleLowerCase('sq-AL')
   }
 
+  function getSupplierAlternativeRecommendations(shortage: ShortageView, limit = 4) {
+    const currentProduct =
+      products.find((p) => p.id === shortage.productId) ??
+      ({
+        id: shortage.productId,
+        name: shortage.productName,
+        supplierId: shortage.supplierId,
+        supplierName: shortage.supplierName,
+        category: 'barna',
+        aliases: [],
+      } satisfies ProductView)
+    return recommendAlternativeSuppliers({
+      currentProduct: {
+        id: currentProduct.id,
+        name: currentProduct.name,
+        supplierId: currentProduct.supplierId,
+        supplierName: currentProduct.supplierName,
+        category: currentProduct.category,
+        aliases: currentProduct.aliases ?? [],
+        genericName: currentProduct.genericName,
+        unitPrice: currentProduct.unitPrice,
+        leadTimeDays: currentProduct.leadTimeDays,
+        minOrderQty: currentProduct.minOrderQty,
+        offerPriority: currentProduct.offerPriority,
+        isActiveOffer: currentProduct.isActiveOffer,
+      },
+      products: products.map((product) => ({
+        id: product.id,
+        name: product.name,
+        supplierId: product.supplierId,
+        supplierName: product.supplierName,
+        category: product.category,
+        aliases: product.aliases ?? [],
+        genericName: product.genericName,
+        unitPrice: product.unitPrice,
+        leadTimeDays: product.leadTimeDays,
+        minOrderQty: product.minOrderQty,
+        offerPriority: product.offerPriority,
+        isActiveOffer: product.isActiveOffer,
+      })),
+      preferredProductByName,
+      limit,
+    })
+  }
+
   function renderSuppliersList(): string {
     const q = supplierQuery.trim().toLocaleLowerCase('sq-AL')
     const rows = suppliers
@@ -1343,14 +1389,68 @@ export function renderPronari(
 
   function openSupplierReassignModal(initial: ShortageView): Promise<string | null> {
     return new Promise((resolve) => {
-      const sameNameProducts = products
-        .filter((p) => p.name.trim().toLocaleLowerCase('sq-AL') === initial.productName.trim().toLocaleLowerCase('sq-AL'))
+      const currentProduct =
+        products.find((p) => p.id === initial.productId) ??
+        ({
+          id: initial.productId,
+          name: initial.productName,
+          supplierId: initial.supplierId,
+          supplierName: initial.supplierName,
+          category: 'barna',
+          aliases: [],
+        } satisfies ProductView)
+      const recommended = getSupplierAlternativeRecommendations(initial, 6)
+      const exactNameProducts = products
+        .filter((p) => normalizeProductNameKey(p.name) === normalizeProductNameKey(initial.productName))
         .sort((a, b) => compareAlbanian(a.supplierName, b.supplierName))
-      const options = sameNameProducts
-        .map(
-          (p) =>
-            `<option value="${p.id}" ${p.id === initial.productId ? 'selected' : ''}>${p.supplierName} (${p.category})</option>`
-        )
+      const optionMap = new Map<string, ProductView>()
+      optionMap.set(currentProduct.id, currentProduct)
+      recommended.forEach((row) => {
+        const match = products.find((product) => product.id === row.productId)
+        if (match) optionMap.set(match.id, match)
+      })
+      exactNameProducts.forEach((product) => optionMap.set(product.id, product))
+      const selectableProducts = [...optionMap.values()]
+      const selectedByDefault = recommended[0]?.productId ?? initial.productId
+      const options = selectableProducts
+        .map((p) => {
+          const rec = recommended.find((row) => row.productId === p.id)
+          const meta: string[] = [p.category]
+          if (typeof p.unitPrice === 'number' && Number.isFinite(p.unitPrice)) meta.push(`${p.unitPrice.toFixed(2)} EUR`)
+          if (typeof p.leadTimeDays === 'number' && Number.isFinite(p.leadTimeDays)) meta.push(`${p.leadTimeDays} dite`)
+          return `<option value="${p.id}" ${p.id === selectedByDefault ? 'selected' : ''}>${p.supplierName} (${meta.join(' • ')})${rec ? ` - AI ${rec.label.toLowerCase()}` : ''}</option>`
+        })
+        .join('')
+      const recommendationCards = recommended
+        .slice(0, 3)
+        .map((row, index) => {
+          const badgeClass =
+            row.label === 'PREFERRED'
+              ? 'border-blue-200 bg-blue-50 text-blue-700'
+              : row.label === 'FASTEST'
+                ? 'border-amber-200 bg-amber-50 text-amber-700'
+                : row.label === 'BEST_VALUE'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-slate-200 bg-slate-100 text-slate-700'
+          const label =
+            row.label === 'PREFERRED'
+              ? 'Preferred'
+              : row.label === 'FASTEST'
+                ? 'Fastest'
+                : row.label === 'BEST_VALUE'
+                  ? 'Best value'
+                  : 'Best match'
+          return `
+            <li class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-semibold text-slate-800">${index + 1}. ${row.supplierName}</p>
+                  <p class="mt-1 text-[11px] text-slate-500">${row.reasons.join(', ')}</p>
+                </div>
+                <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">${label}</span>
+              </div>
+            </li>`
+        })
         .join('')
 
       const overlay = document.createElement('div')
@@ -1361,6 +1461,15 @@ export function renderPronari(
           <p class="text-sm text-slate-500 mb-4">Zgjidh furnitorin për <strong>${initial.productName}</strong>.</p>
           <label class="text-sm text-slate-700 block">
             Furnitori
+            <div class="mb-4 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+              <p class="text-xs font-semibold uppercase tracking-wide text-sky-700">AI recommendation</p>
+              ${
+                recommended.length
+                  ? `<p class="mt-1 text-sm text-slate-700">Sugjerimi kryesor: <strong>${recommended[0].supplierName}</strong></p>
+                     <ul class="mt-3 space-y-2">${recommendationCards}</ul>`
+                  : '<p class="mt-1 text-sm text-slate-600">Nuk u gjet alternative e forte. Po shfaqen furnitoret ekzistues per zgjedhje manuale.</p>'
+              }
+            </div>
             <select id="owner-reassign-supplier-product" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
               ${options || `<option value="${initial.productId}">${initial.supplierName}</option>`}
             </select>
@@ -1868,10 +1977,15 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     }
     return rows
       .map(
-        (s) => `
+        (s) => {
+          const topAlternative = getSupplierAlternativeRecommendations(s, 1)[0]
+          const recommendationCopy = topAlternative
+            ? `AI sugjeron ${topAlternative.supplierName}: ${topAlternative.reasons.join(', ')}`
+            : ''
+          return `
       <tr class="owner-shortage-row border-t border-slate-200 hover:bg-slate-50/70 transition-colors">
         <td data-label="Barna" class="px-3 py-3">
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <div class="owner-product-badge h-7 w-7 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center text-[10px] font-semibold text-blue-700">
               ${s.productName.slice(0, 2).toUpperCase()}
             </div>
@@ -1905,9 +2019,20 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
             </div>
           </div>
         </td>
-        <td data-label="Furnitori" class="owner-supplier-cell px-3 py-3 text-slate-700 text-xs">${s.supplierName}</td>
+        <td data-label="Furnitori" class="owner-supplier-cell px-3 py-3 text-slate-700 text-xs">
+          <div class="space-y-1">
+            <div>${s.supplierName}</div>
+            ${
+              topAlternative
+                ? `<div class="inline-flex max-w-[220px] rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700" title="${recommendationCopy}">
+                    AI alt: ${topAlternative.supplierName}
+                  </div>`
+                : '<span class="text-[10px] text-slate-400">Nuk ka alternative te qarte</span>'
+            }
+          </div>
+        </td>
         <td data-label="Shënim" class="px-3 py-3">
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <span class="owner-status-pill rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
               s.urgent
                 ? 'owner-status-urgent bg-red-100 text-red-700 border-red-200'
@@ -1918,6 +2043,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
             ${s.note ? `<span class="owner-note-text text-[11px] text-slate-600 max-w-40 truncate">${s.note}</span>` : ''}
             ${s.createdByLabel ? `<span class="owner-note-text text-[10px] text-blue-700">nga ${s.createdByLabel}${s.createdByRole ? ` (${s.createdByRole})` : ''}</span>` : ''}
             ${s.aiReason ? `<span class="w-full text-[10px] text-slate-500">AI: ${s.aiReason}</span>` : ''}
+            ${topAlternative ? `<span class="w-full text-[10px] text-emerald-700">${recommendationCopy}</span>` : ''}
           </div>
         </td>
         <td data-label="Veprime" class="px-3 py-3 text-right">
@@ -1929,6 +2055,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
           </div>
         </td>
       </tr>`
+        }
       )
       .join('')
   }
