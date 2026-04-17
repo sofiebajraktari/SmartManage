@@ -70,6 +70,12 @@ npm run dev
 npm run build
 ```
 
+5. Verifikim i shpejte para commit/deploy:
+
+```bash
+npm run verify
+```
+
 Output-i i build-it gjendet ne folderin `out`.
 
 ## Supabase
@@ -116,6 +122,8 @@ Nese perdoret OAuth, shto URL-te perkatese te projektit te deploy-uar te `Supaba
 | --- | --- |
 | `npm run dev` | Development server |
 | `npm run build` | Production build |
+| `npm run typecheck` | Kontrollon TypeScript pa gjeneruar build |
+| `npm run verify` | Ekzekuton `typecheck` dhe pastaj `build` |
 | `npm run preview` | Preview i build-it |
 
 ## Verifikim
@@ -125,8 +133,8 @@ Aktualisht repo-ja nuk ka suite automatike testesh (`test`, `spec`, `e2e`).
 Kontrollet praktike qe duhen perdorur:
 
 ```bash
-npx tsc --noEmit
-npm run build
+npm run typecheck
+npm run verify
 ```
 
 Pastaj duhen testuar manualisht ne browser:
