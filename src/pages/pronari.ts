@@ -185,6 +185,15 @@ function buildEmptyDashboardInsights(days: 7 | 14 | 30): DashboardInsights {
     topProducts: [],
     urgentBreakdown: { urgent: 0, normal: 0 },
     weekdayTrend,
+    ai: {
+      predictedNext7Days: 0,
+      averageConfidence: 0,
+      anomalyScore: 0,
+      anomalyLevel: 'LOW',
+      summary: 'Nuk ka te dhena te mjaftueshme per parashikim.',
+      action: 'Mbledh me shume histori per rekomandime me te sakta.',
+      topRiskProducts: [],
+    },
   }
 }
 
@@ -1098,11 +1107,10 @@ export function renderPronari(
           </table>
         </div>`
       : '<p class="text-[11px] text-slate-500">Nuk ka rreshta valid për import.</p>'
-
     return `
       <div class="space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <span class="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-700">Valid: ${pendingImportRows.length}</span>
             <span class="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-semibold text-amber-700">Gabime: ${pendingImportIssues.length}</span>
             ${lastImportFileName ? `<span class="truncate max-w-50 text-slate-500" title="${lastImportFileName}">${lastImportFileName}</span>` : ''}
@@ -1874,10 +1882,27 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
           </div>
         </td>
         <td data-label="Sasia" class="px-3 py-3">
-          <div class="owner-qty-pill inline-flex items-center rounded-full border border-slate-300 bg-white px-2 py-1 gap-1">
-            <button data-action="decrement" data-id="${s.id}" class="owner-qty-btn text-slate-600 text-xs px-1 hover:text-slate-900">-</button>
-            <span class="owner-qty-value w-6 text-center text-slate-800 text-xs">${s.suggestedQty}</span>
-            <button data-action="increment" data-id="${s.id}" class="owner-qty-btn text-slate-600 text-xs px-1 hover:text-slate-900">+</button>
+          <div class="space-y-1">
+            <div class="owner-qty-pill inline-flex items-center rounded-full border border-slate-300 bg-white px-2 py-1 gap-1">
+              <button data-action="decrement" data-id="${s.id}" class="owner-qty-btn text-slate-600 text-xs px-1 hover:text-slate-900">-</button>
+              <span class="owner-qty-value w-6 text-center text-slate-800 text-xs">${s.suggestedQty}</span>
+              <button data-action="increment" data-id="${s.id}" class="owner-qty-btn text-slate-600 text-xs px-1 hover:text-slate-900">+</button>
+            </div>
+            <div class="flex flex-wrap items-center gap-1 text-[10px]">
+              <span class="rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-semibold text-sky-700">AI ${s.aiSuggestedQty ?? s.suggestedQty}</span>
+              <span class="text-slate-500">Besim ${s.aiConfidence ?? 0}%</span>
+            </div>
+            <div class="text-[10px]">
+              <span class="rounded-full border px-1.5 py-0.5 font-semibold ${
+                s.aiRiskLevel === 'HIGH'
+                  ? 'border-red-200 bg-red-50 text-red-700'
+                  : s.aiRiskLevel === 'MEDIUM'
+                    ? 'border-amber-200 bg-amber-50 text-amber-700'
+                    : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+              }">
+                AI ${s.aiRiskLevel === 'HIGH' ? 'Rrezik i larte' : s.aiRiskLevel === 'MEDIUM' ? 'Rrezik mesatar' : 'Rrezik i ulet'}
+              </span>
+            </div>
           </div>
         </td>
         <td data-label="Furnitori" class="owner-supplier-cell px-3 py-3 text-slate-700 text-xs">${s.supplierName}</td>
@@ -1892,6 +1917,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
             </span>
             ${s.note ? `<span class="owner-note-text text-[11px] text-slate-600 max-w-40 truncate">${s.note}</span>` : ''}
             ${s.createdByLabel ? `<span class="owner-note-text text-[10px] text-blue-700">nga ${s.createdByLabel}${s.createdByRole ? ` (${s.createdByRole})` : ''}</span>` : ''}
+            ${s.aiReason ? `<span class="w-full text-[10px] text-slate-500">AI: ${s.aiReason}</span>` : ''}
           </div>
         </td>
         <td data-label="Veprime" class="px-3 py-3 text-right">
@@ -2116,6 +2142,47 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     const urgencyTotal = Math.max(urgentTotal + normalTotal, 1)
     const urgentPercent = Math.round((urgentTotal / urgencyTotal) * 100)
     const normalPercent = 100 - urgentPercent
+    const ai = dashboardInsights.ai ?? buildEmptyDashboardInsights(dashboardRangeDays).ai
+    const aiAnomalyClass =
+      ai.anomalyLevel === 'HIGH'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : ai.anomalyLevel === 'MEDIUM'
+          ? 'border-amber-200 bg-amber-50 text-amber-700'
+          : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    const aiAnomalyLabel =
+      ai.anomalyLevel === 'HIGH'
+        ? 'Anomali e larte'
+        : ai.anomalyLevel === 'MEDIUM'
+          ? 'Anomali mesatare'
+          : 'Anomali e ulet'
+    const aiPriorityRows = ai.topRiskProducts
+      .map((item) => {
+        const badgeClass =
+          item.riskLevel === 'HIGH'
+            ? 'border-red-200 bg-red-50 text-red-700'
+            : item.riskLevel === 'MEDIUM'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.name}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.supplierName}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">
+                ${item.riskLevel === 'HIGH' ? 'Larte' : item.riskLevel === 'MEDIUM' ? 'Mesatare' : 'Ulet'}
+              </span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>AI sasi ${item.recommendedQty}</span>
+              <span>7d ${item.forecastNext7Days}</span>
+              <span>Besim ${item.confidence}%</span>
+            </div>
+            <p class="mt-1 text-[10px] text-slate-500">${item.reason}</p>
+          </li>`
+      })
+      .join('')
     const weekdayData =
       dashboardInsights.weekdayTrend.length > 0
         ? dashboardInsights.weekdayTrend
@@ -2192,6 +2259,39 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
           <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
             <p class="mb-2 text-xs font-semibold text-slate-700">Top produktet (${dashboardRangeDays} ditë)</p>
             <ul class="space-y-1.5">${topProductRows || '<li class="text-xs text-slate-500">Nuk ka të dhëna.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <div class="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p class="text-xs font-semibold text-slate-700">AI Forecast</p>
+                <p class="mt-1 text-[11px] text-slate-500">${ai.summary}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${aiAnomalyClass}">
+                ${aiAnomalyLabel}
+              </span>
+            </div>
+            <div class="mt-3 grid gap-2 sm:grid-cols-3">
+              <div class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                <p class="text-[10px] uppercase tracking-wide text-slate-500">7 dite</p>
+                <p class="mt-1 text-lg font-semibold text-slate-900">${ai.predictedNext7Days}</p>
+                <p class="text-[10px] text-slate-500">sinjale te parashikuara</p>
+              </div>
+              <div class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                <p class="text-[10px] uppercase tracking-wide text-slate-500">Besueshmeri</p>
+                <p class="mt-1 text-lg font-semibold text-slate-900">${ai.averageConfidence}%</p>
+                <p class="text-[10px] text-slate-500">mesatarja e modelit</p>
+              </div>
+              <div class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                <p class="text-[10px] uppercase tracking-wide text-slate-500">Anomali</p>
+                <p class="mt-1 text-lg font-semibold text-slate-900">${ai.anomalyScore}</p>
+                <p class="text-[10px] text-slate-500">devijim nga ritmi normal</p>
+              </div>
+            </div>
+            <p class="mt-3 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[10px] text-slate-600">${ai.action}</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">Prioritetet e AI per ri-porosi</p>
+            <ul class="space-y-1.5">${aiPriorityRows || '<li class="text-xs text-slate-500">AI ende nuk ka mjaft histori per te renditur produkte prioritare.</li>'}</ul>
           </div>
           <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
             <p class="mb-2 text-xs font-semibold text-slate-700">Urgjente vs normale</p>

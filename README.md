@@ -17,6 +17,8 @@ Stack-u kryesor:
 - `OWNER` menaxhon dashboard-in, mungesat, porosite, importin, kompanine dhe ekipen
 - `MANAGER` ka qasje ne dashboard, mungesat dhe porosite, por jo ne seksionet owner-only
 - mungesat grupohen sipas furnitorit per gjenerim porosish
+- dashboard-i perfshin parashikim lokal te mungesave, zbulim anomalish dhe prioritete AI per ri-porosi
+- sasia e sugjeruar ne mungesa llogaritet nga nje motor AI lokal bazuar ne histori 30-ditore, urgjence dhe ritmin e kerkeses
 - porosite mund te kopjohen, shkarkohen si PDF dhe te shenohen si `SENT`
 - te dhenat jane te ndara sipas kompanise
 - `public.mungesat` perdoret me `Realtime`

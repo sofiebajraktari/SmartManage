@@ -13,6 +13,12 @@ import {
   type MissingItem as MockMissingItem,
   type MockProduct,
 } from './mockData.js'
+import {
+  buildAiOverview,
+  forecastProductDemand,
+  type AiOverview,
+  type AiRiskLevel,
+} from './inventoryAi.js'
 
 export interface OwnerOrder {
   id: number
@@ -43,6 +49,11 @@ export interface ShortageView {
   note: string
   addedCount: number
   suggestedQty: number
+  aiSuggestedQty?: number
+  aiConfidence?: number
+  aiRiskScore?: number
+  aiRiskLevel?: AiRiskLevel
+  aiReason?: string
   createdById?: string
   createdByRole?: 'OWNER' | 'MANAGER' | 'WORKER'
   createdByLabel?: string
@@ -70,6 +81,7 @@ export interface DashboardInsights {
   topProducts: Array<{ name: string; count: number }>
   urgentBreakdown: { urgent: number; normal: number }
   weekdayTrend: Array<{ day: string; count: number }>
+  ai: AiOverview
 }
 
 const COMPANY_ID_CACHE_TTL_MS = 60_000
@@ -111,6 +123,28 @@ function shiftIsoDays(base: Date, offsetDays: number): string {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+function buildIsoRangeFromAnchor(anchorIso: string, days: number): string[] {
+  const safeDays = Math.max(1, Math.floor(days))
+  const anchor = new Date(`${anchorIso}T00:00:00`)
+  if (Number.isNaN(anchor.getTime())) {
+    const today = new Date()
+    return Array.from({ length: safeDays }, (_, idx) => shiftIsoDays(today, -(safeDays - 1 - idx)))
+  }
+  return Array.from({ length: safeDays }, (_, idx) => shiftIsoDays(anchor, -(safeDays - 1 - idx)))
+}
+
+function emptyAiOverview(): AiOverview {
+  return {
+    predictedNext7Days: 0,
+    averageConfidence: 0,
+    anomalyScore: 0,
+    anomalyLevel: 'LOW',
+    summary: 'Nuk ka te dhena te mjaftueshme per parashikim.',
+    action: 'Mbledh me shume histori per rekomandime me te sakta.',
+    topRiskProducts: [],
+  }
 }
 
 async function resolveCurrentCompanyId(): Promise<string | null> {
@@ -224,6 +258,24 @@ function stableOrderUiId(id: string, fallback: number): number {
   return fallback
 }
 
+function buildProductDailySeries(
+  dateRange: string[],
+  rows: Array<{ day: string; productId: string; count: number }>
+): Map<string, number[]> {
+  const dateIndex = new Map(dateRange.map((date, index) => [date, index]))
+  const out = new Map<string, number[]>()
+  rows.forEach((row) => {
+    const index = dateIndex.get(row.day)
+    if (index == null) return
+    const productId = String(row.productId ?? '').trim()
+    if (!productId) return
+    const current = out.get(productId) ?? Array.from({ length: dateRange.length }, () => 0)
+    current[index] += Math.max(0, Number(row.count ?? 0))
+    out.set(productId, current)
+  })
+  return out
+}
+
 function fromMockShortages(rows: MockMissingItem[]): ShortageView[] {
   return rows.map((r) => ({
     id: r.id,
@@ -234,6 +286,11 @@ function fromMockShortages(rows: MockMissingItem[]): ShortageView[] {
     note: r.note,
     addedCount: r.addedCount,
     suggestedQty: r.suggestedQty,
+    aiSuggestedQty: r.suggestedQty,
+    aiConfidence: 42,
+    aiRiskScore: r.urgent ? 72 : 38,
+    aiRiskLevel: r.urgent ? 'HIGH' : 'LOW',
+    aiReason: r.urgent ? 'Urgjence aktive' : 'Bazuar ne mungesat e ruajtura lokalisht',
     createdById: undefined,
     createdByRole: undefined,
     createdByLabel: undefined,
@@ -824,9 +881,17 @@ export async function getDashboardInsights(
 
   if (!isSupabaseConfigured) {
     const shortages = fromMockShortages(getShortagesMock())
+    const products = fromMockProducts(getProductsMock())
     const supplierMap = new Map<string, number>()
     const productMap = new Map<string, number>()
     const weekdayMap = new Map<string, number>(weekdayLabels.map((day) => [day, 0]))
+    const analysisRange = buildIsoRangeFromAnchor(todayIso(), 30)
+    const historyRows = shortages.map((row) => ({
+      day: analysisRange[analysisRange.length - 1],
+      productId: row.productId,
+      count: row.addedCount,
+    }))
+    const seriesByProduct = buildProductDailySeries(analysisRange, historyRows)
     let urgent = 0
     let normal = 0
     for (const row of shortages) {
@@ -841,12 +906,27 @@ export async function getDashboardInsights(
       weekdayMap.set(dayLabel, (weekdayMap.get(dayLabel) ?? 0) + c)
     }
     if (emptyTrend.length) emptyTrend[emptyTrend.length - 1].count = shortages.length
+    const ai = buildAiOverview(
+      [...seriesByProduct.entries()].map(([productId, dailySeries]) => {
+        const product = products.find((row) => row.id === productId)
+        return {
+          productId,
+          name: product?.name ?? 'Produkt',
+          supplierName: product?.supplierName ?? 'Pa furnitor',
+          dailySeries,
+          defaultOrderQty: product?.defaultOrderQty ?? 1,
+          addedCount: dailySeries[dailySeries.length - 1] ?? 0,
+          urgentNow: shortages.some((row) => row.productId === productId && row.urgent),
+        }
+      })
+    )
     return {
       shortageTrend: emptyTrend,
       topSuppliers: [...supplierMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count })),
       topProducts: [...productMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count })),
       urgentBreakdown: { urgent, normal },
       weekdayTrend: weekdayLabels.map((day) => ({ day, count: weekdayMap.get(day) ?? 0 })),
+      ai,
     }
   }
   const companyId = await resolveCurrentCompanyId()
@@ -857,6 +937,7 @@ export async function getDashboardInsights(
       topProducts: [],
       urgentBreakdown: { urgent: 0, normal: 0 },
       weekdayTrend: emptyWeekdays,
+      ai: emptyAiOverview(),
     }
   }
 
@@ -874,7 +955,8 @@ export async function getDashboardInsights(
     String(latestShortage?.created_at ?? '').trim().slice(0, 10) ||
     todayIso()
   const dateRange = buildRange(latestDay)
-  const sinceIso = dateRange[0]
+  const analysisRange = buildIsoRangeFromAnchor(latestDay, Math.max(30, safeDays))
+  const sinceIso = analysisRange[0]
 
   const [shortagesRes, products] = await Promise.all([
     supabase
@@ -892,6 +974,7 @@ export async function getDashboardInsights(
       topProducts: [],
       urgentBreakdown: { urgent: 0, normal: 0 },
       weekdayTrend: emptyWeekdays,
+      ai: emptyAiOverview(),
     }
   }
 
@@ -901,6 +984,7 @@ export async function getDashboardInsights(
       {
         name: String(p.name ?? '').trim() || 'Produkt',
         supplier: String(p.supplierName ?? '').trim() || 'Pa furnitor',
+        defaultOrderQty: Math.max(1, Number(p.defaultOrderQty ?? 1)),
       },
     ])
   )
@@ -924,6 +1008,7 @@ export async function getDashboardInsights(
       topProducts: [],
       urgentBreakdown: { urgent: 0, normal: 0 },
       weekdayTrend: emptyWeekdays,
+      ai: emptyAiOverview(),
     }
   }
 
@@ -931,12 +1016,18 @@ export async function getDashboardInsights(
   const bySupplier = new Map<string, number>()
   const byProduct = new Map<string, number>()
   const weekdayMap = new Map<string, number>(weekdayLabels.map((day) => [day, 0]))
+  const urgentRecentByProduct = new Map<string, number>()
+  const analysisDateSet = new Set(analysisRange)
+  const recentUrgencyThreshold = analysisRange[Math.max(0, analysisRange.length - 7)] ?? analysisRange[0]
   let urgentCount = 0
   let normalCount = 0
   for (const row of normalizedRows) {
     const day = row.day
-    if (!day || !byDay.has(day)) continue
-    if (day < sinceIso) continue
+    if (!day || !analysisDateSet.has(day)) continue
+    if (row.urgent && day >= recentUrgencyThreshold) {
+      urgentRecentByProduct.set(row.productId, (urgentRecentByProduct.get(row.productId) ?? 0) + row.count)
+    }
+    if (!byDay.has(day)) continue
     const count = row.count
     byDay.set(day, (byDay.get(day) ?? 0) + count)
     if (row.urgent) urgentCount += count
@@ -954,12 +1045,28 @@ export async function getDashboardInsights(
     bySupplier.set(supplier, (bySupplier.get(supplier) ?? 0) + count)
     byProduct.set(product, (byProduct.get(product) ?? 0) + count)
   }
+  const seriesByProduct = buildProductDailySeries(analysisRange, normalizedRows)
+  const ai = buildAiOverview(
+    [...seriesByProduct.entries()].map(([productId, dailySeries]) => {
+      const product = productById.get(productId)
+      return {
+        productId,
+        name: product?.name ?? 'Produkt',
+        supplierName: product?.supplier ?? 'Pa furnitor',
+        dailySeries,
+        defaultOrderQty: product?.defaultOrderQty ?? 1,
+        addedCount: dailySeries[dailySeries.length - 1] ?? 0,
+        urgentNow: (urgentRecentByProduct.get(productId) ?? 0) > 0,
+      }
+    })
+  )
   return {
     shortageTrend: dateRange.map((date) => ({ date, count: byDay.get(date) ?? 0 })),
     topSuppliers: [...bySupplier.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count })),
     topProducts: [...byProduct.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count })),
     urgentBreakdown: { urgent: urgentCount, normal: normalCount },
     weekdayTrend: weekdayLabels.map((day) => ({ day, count: weekdayMap.get(day) ?? 0 })),
+    ai,
   }
 }
 
@@ -1205,8 +1312,10 @@ export async function getTodayShortages(
   if (!isSupabaseConfigured) return fromMockShortages(getShortagesMock())
   const companyId = await resolveCurrentCompanyId()
   if (!companyId) return []
+  const historyRange = buildIsoRangeFromAnchor(todayIso(), 30)
+  const historySinceIso = historyRange[0]
 
-  const [productsRes, shortagesRes, lastQtyRpc] = await Promise.all([
+  const [productsRes, shortagesRes, lastQtyRpc, historyRes] = await Promise.all([
     resolveProductsInput(productsInput),
     supabase
       .from('mungesat')
@@ -1215,6 +1324,12 @@ export async function getTodayShortages(
       .eq('entry_date', todayIso())
       .order('created_at', { ascending: false }),
     supabase.rpc('last_final_qty_by_product'),
+    supabase
+      .from('mungesat')
+      .select('entry_date,created_at,added_count,product_id')
+      .eq('company_id', companyId)
+      .gte('created_at', `${historySinceIso}T00:00:00.000Z`)
+      .order('created_at', { ascending: true }),
   ])
 
   if (shortagesRes.error || !shortagesRes.data) return []
@@ -1250,16 +1365,38 @@ export async function getTodayShortages(
       if (Number.isFinite(qty) && qty > 0) lastFinalQtyByProduct.set(row.product_id, qty)
     }
   }
+  const historyRows = !historyRes.error && Array.isArray(historyRes.data)
+    ? historyRes.data
+        .map((row: any) => {
+          const entryDay = String(row.entry_date ?? '').trim()
+          const createdAt = String(row.created_at ?? '').trim()
+          const createdDay = createdAt ? createdAt.slice(0, 10) : ''
+          const day = entryDay || createdDay
+          return {
+            day,
+            productId: String(row.product_id ?? '').trim(),
+            count: Math.max(1, Number(row.added_count ?? 1)),
+          }
+        })
+        .filter((row: { day: string; productId: string; count: number }) => Boolean(row.day && row.productId))
+    : []
+  const historySeriesByProduct = buildProductDailySeries(historyRange, historyRows)
 
   return shortagesRes.data.map((row: any) => {
     const product = productMap.get(row.product_id)
     const addedCount = Math.max(1, Number(row.added_count ?? 1))
     const lastFinalQty = lastFinalQtyByProduct.get(row.product_id)
-    const defaultQty = Math.max(1, Number(product?.defaultOrderQty ?? 1))
-    const baseQty = lastFinalQty && lastFinalQty > 0 ? lastFinalQty : defaultQty
-    const urgentBump = row.urgent ? 1 : 0
-    const repeatBump = addedCount >= 3 ? 1 : 0
-    const suggestedQty = Math.max(1, baseQty + urgentBump + repeatBump)
+    const forecast = forecastProductDemand({
+      productId: String(row.product_id ?? '').trim(),
+      name: product?.name ?? 'Produkt',
+      supplierName: product?.supplierName ?? 'Pa furnitor',
+      dailySeries: historySeriesByProduct.get(String(row.product_id ?? '').trim()) ?? Array.from({ length: historyRange.length }, () => 0),
+      defaultOrderQty: product?.defaultOrderQty ?? 1,
+      lastFinalQty,
+      addedCount,
+      urgentNow: Boolean(row.urgent),
+    })
+    const suggestedQty = Math.max(1, forecast.recommendedQty)
     return {
       id: row.id,
       productId: row.product_id,
@@ -1270,6 +1407,11 @@ export async function getTodayShortages(
       note: row.note ?? '',
       addedCount,
       suggestedQty,
+      aiSuggestedQty: forecast.recommendedQty,
+      aiConfidence: forecast.confidence,
+      aiRiskScore: forecast.riskScore,
+      aiRiskLevel: forecast.riskLevel,
+      aiReason: forecast.reason,
       createdById: String(row.created_by ?? '').trim() || undefined,
       createdByRole: String(row.created_by_role ?? '').trim().toUpperCase() as
         | 'OWNER'
