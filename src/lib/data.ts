@@ -3,7 +3,6 @@ import {
   addProduct as addProductMock,
   deleteProduct as deleteProductMock,
   addShortage as addShortageMock,
-  buildOrdersFromShortages as buildOrdersFromShortagesMock,
   deleteShortage as deleteShortageMock,
   getProducts as getProductsMock,
   updateProduct as updateProductMock,
@@ -16,9 +15,21 @@ import {
 import {
   buildAiOverview,
   forecastProductDemand,
+  optimizeReorderPlan,
+  type AiOrderPriority,
   type AiOverview,
   type AiRiskLevel,
 } from './inventoryAi.js'
+
+export interface OwnerOrderLine {
+  productName: string
+  qty: number
+  urgent: boolean
+  estimatedCost?: number | null
+  leadTimeDays?: number
+  coverageDays?: number
+  priority?: AiOrderPriority
+}
 
 export interface OwnerOrder {
   id: number
@@ -26,6 +37,12 @@ export interface OwnerOrder {
   supplier: string
   items: string[]
   status?: 'DRAFT' | 'SENT' | 'FAILED'
+  lines?: OwnerOrderLine[]
+  aiEstimatedCost?: number | null
+  aiMaxLeadTimeDays?: number | null
+  aiCoverageDays?: number | null
+  aiPriority?: AiOrderPriority
+  aiSummary?: string
 }
 
 export interface ProductView {
@@ -54,11 +71,21 @@ export interface ShortageView {
   note: string
   addedCount: number
   suggestedQty: number
+  unitPrice?: number
+  leadTimeDays?: number
+  minOrderQty?: number
   aiSuggestedQty?: number
   aiConfidence?: number
   aiRiskScore?: number
   aiRiskLevel?: AiRiskLevel
   aiReason?: string
+  aiForecastPerDay?: number
+  aiForecastNext7Days?: number
+  aiOptimizedQty?: number
+  aiCoverageDays?: number
+  aiEstimatedCost?: number | null
+  aiOrderPriority?: AiOrderPriority
+  aiOrderAction?: string
   createdById?: string
   createdByRole?: 'OWNER' | 'MANAGER' | 'WORKER'
   createdByLabel?: string
@@ -281,25 +308,171 @@ function buildProductDailySeries(
   return out
 }
 
-function fromMockShortages(rows: MockMissingItem[]): ShortageView[] {
-  return rows.map((r) => ({
-    id: r.id,
-    productId: r.product.id,
-    productName: r.product.name,
-    supplierName: r.product.supplier,
-    urgent: r.urgent,
-    note: r.note,
-    addedCount: r.addedCount,
-    suggestedQty: r.suggestedQty,
-    aiSuggestedQty: r.suggestedQty,
-    aiConfidence: 42,
-    aiRiskScore: r.urgent ? 72 : 38,
-    aiRiskLevel: r.urgent ? 'HIGH' : 'LOW',
-    aiReason: r.urgent ? 'Urgjence aktive' : 'Bazuar ne mungesat e ruajtura lokalisht',
-    createdById: undefined,
-    createdByRole: undefined,
-    createdByLabel: undefined,
+function priorityRank(priority?: AiOrderPriority): number {
+  if (priority === 'HIGH') return 3
+  if (priority === 'MEDIUM') return 2
+  return 1
+}
+
+function priorityLabel(priority?: AiOrderPriority): string {
+  if (priority === 'HIGH') return 'i larte'
+  if (priority === 'MEDIUM') return 'mesatar'
+  return 'i ulet'
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+function buildOrderDetails(items: ShortageView[]): {
+  lines: OwnerOrderLine[]
+  aiEstimatedCost: number | null
+  aiMaxLeadTimeDays: number | null
+  aiCoverageDays: number | null
+  aiPriority: AiOrderPriority
+  aiSummary: string
+} {
+  const lines: OwnerOrderLine[] = items.map((row) => ({
+    productName: row.productName,
+    qty: Math.max(1, Number(row.suggestedQty ?? 1)),
+    urgent: Boolean(row.urgent),
+    estimatedCost:
+      row.aiEstimatedCost != null
+        ? Number(row.aiEstimatedCost)
+        : row.unitPrice != null
+          ? roundMoney(Math.max(1, Number(row.suggestedQty ?? 1)) * Number(row.unitPrice))
+          : null,
+    leadTimeDays: row.leadTimeDays,
+    coverageDays: row.aiCoverageDays,
+    priority: row.aiOrderPriority,
   }))
+
+  const costValues = lines
+    .map((line) => Number(line.estimatedCost))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  const leadValues = lines
+    .map((line) => Number(line.leadTimeDays))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  const coverageValues = lines
+    .map((line) => Number(line.coverageDays))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  const topLine =
+    lines
+      .slice()
+      .sort((a, b) => {
+        const priorityDiff = priorityRank(b.priority) - priorityRank(a.priority)
+        if (priorityDiff !== 0) return priorityDiff
+        return Number(b.qty ?? 0) - Number(a.qty ?? 0)
+      })[0] ?? null
+  const aiEstimatedCost = costValues.length ? roundMoney(costValues.reduce((sum, value) => sum + value, 0)) : null
+  const aiMaxLeadTimeDays = leadValues.length ? Math.max(...leadValues) : null
+  const aiCoverageDays = coverageValues.length ? Math.round(Math.min(...coverageValues) * 10) / 10 : null
+  const aiPriority = lines.reduce<AiOrderPriority>(
+    (best, line) => (priorityRank(line.priority) > priorityRank(best) ? line.priority ?? best : best),
+    'LOW'
+  )
+  const summaryParts = [`Prioritet ${priorityLabel(aiPriority)}`]
+  if (topLine?.productName) summaryParts.push(`fokus ${topLine.productName}`)
+  if (aiCoverageDays != null) summaryParts.push(`mbulim ~${aiCoverageDays} dite`)
+  if (aiMaxLeadTimeDays != null) summaryParts.push(`lead deri ${aiMaxLeadTimeDays} dite`)
+  if (aiEstimatedCost != null) summaryParts.push(`kosto ~${aiEstimatedCost.toFixed(2)} EUR`)
+  return {
+    lines,
+    aiEstimatedCost,
+    aiMaxLeadTimeDays,
+    aiCoverageDays,
+    aiPriority,
+    aiSummary: summaryParts.join(', '),
+  }
+}
+
+export function formatOwnerOrderReceipt(order: OwnerOrder): string {
+  const date = new Date().toLocaleString('sq-AL')
+  const aiLines: string[] = []
+  if (order.aiPriority) aiLines.push(`AI prioriteti: ${order.aiPriority}`)
+  if (order.aiCoverageDays != null) aiLines.push(`AI mbulim: ${order.aiCoverageDays.toFixed(1)} dite`)
+  if (order.aiMaxLeadTimeDays != null) aiLines.push(`AI lead time: ${order.aiMaxLeadTimeDays} dite`)
+  if (order.aiEstimatedCost != null) aiLines.push(`AI kosto: ${order.aiEstimatedCost.toFixed(2)} EUR`)
+  if (order.aiSummary) aiLines.push(`AI rekomandim: ${order.aiSummary}`)
+
+  return `POROSI MUNGESASH
+Data: ${date}
+Furnitori: ${order.supplier}
+ID: #${order.id}
+${aiLines.length ? `${aiLines.join('\n')}\n` : ''}---------------------------
+${order.items.join('\n')}
+
+Shenim: Ju lutem konfirmoni disponueshmerine dhe kohen e dorezimit.`
+}
+
+function parseOwnerOrderReceiptAi(receiptText: string): Pick<
+  OwnerOrder,
+  'aiEstimatedCost' | 'aiMaxLeadTimeDays' | 'aiCoverageDays' | 'aiPriority' | 'aiSummary'
+> {
+  const text = String(receiptText ?? '')
+  const priorityMatch = text.match(/AI prioriteti:\s*(HIGH|MEDIUM|LOW)/i)
+  const coverageMatch = text.match(/AI mbulim:\s*([0-9]+(?:\.[0-9]+)?)\s*dite/i)
+  const leadMatch = text.match(/AI lead time:\s*([0-9]+)\s*dite/i)
+  const costMatch = text.match(/AI kosto:\s*([0-9]+(?:\.[0-9]+)?)\s*EUR/i)
+  const summaryMatch = text.match(/AI rekomandim:\s*(.+)/i)
+  return {
+    aiPriority: priorityMatch ? (priorityMatch[1].toUpperCase() as AiOrderPriority) : undefined,
+    aiCoverageDays: coverageMatch ? Number(coverageMatch[1]) : undefined,
+    aiMaxLeadTimeDays: leadMatch ? Number(leadMatch[1]) : undefined,
+    aiEstimatedCost: costMatch ? Number(costMatch[1]) : undefined,
+    aiSummary: summaryMatch ? summaryMatch[1].trim() : undefined,
+  }
+}
+
+function fromMockShortages(rows: MockMissingItem[]): ShortageView[] {
+  return rows.map((r) => {
+    const baseSuggestedQty = Math.max(1, Number(r.suggestedQty ?? 1))
+    const forecastPerDay = Math.max(0.3, baseSuggestedQty / 5)
+    const forecastNext7Days = Math.max(baseSuggestedQty, Math.round(forecastPerDay * 7))
+    const aiRiskScore = r.urgent ? 78 : 46
+    const aiRiskLevel: AiRiskLevel = r.urgent ? 'HIGH' : 'MEDIUM'
+    const plan = optimizeReorderPlan({
+      productName: r.product.name,
+      supplierName: r.product.supplier,
+      suggestedQty: baseSuggestedQty,
+      forecastPerDay,
+      forecastNext7Days,
+      aiRiskScore,
+      aiRiskLevel,
+      urgentNow: r.urgent,
+      unitPrice: r.product.unitPrice,
+      leadTimeDays: r.product.leadTimeDays,
+      minOrderQty: r.product.minOrderQty,
+    })
+    return {
+      id: r.id,
+      productId: r.product.id,
+      productName: r.product.name,
+      supplierName: r.product.supplier,
+      urgent: r.urgent,
+      note: r.note,
+      addedCount: r.addedCount,
+      suggestedQty: plan.optimizedQty,
+      unitPrice: r.product.unitPrice,
+      leadTimeDays: r.product.leadTimeDays,
+      minOrderQty: r.product.minOrderQty,
+      aiSuggestedQty: baseSuggestedQty,
+      aiConfidence: 42,
+      aiRiskScore,
+      aiRiskLevel,
+      aiReason: r.urgent ? 'Urgjence aktive' : 'Bazuar ne mungesat e ruajtura lokalisht',
+      aiForecastPerDay: forecastPerDay,
+      aiForecastNext7Days: forecastNext7Days,
+      aiOptimizedQty: plan.optimizedQty,
+      aiCoverageDays: plan.coverageDays,
+      aiEstimatedCost: plan.estimatedCost,
+      aiOrderPriority: plan.priority,
+      aiOrderAction: plan.action,
+      createdById: undefined,
+      createdByRole: undefined,
+      createdByLabel: undefined,
+    }
+  })
 }
 
 function fromMockProducts(rows: MockProduct[]): ProductView[] {
@@ -1416,17 +1589,31 @@ export async function getTodayShortages(
     const product = productMap.get(row.product_id)
     const addedCount = Math.max(1, Number(row.added_count ?? 1))
     const lastFinalQty = lastFinalQtyByProduct.get(row.product_id)
+    const productId = String(row.product_id ?? '').trim()
     const forecast = forecastProductDemand({
-      productId: String(row.product_id ?? '').trim(),
+      productId,
       name: product?.name ?? 'Produkt',
       supplierName: product?.supplierName ?? 'Pa furnitor',
-      dailySeries: historySeriesByProduct.get(String(row.product_id ?? '').trim()) ?? Array.from({ length: historyRange.length }, () => 0),
+      dailySeries: historySeriesByProduct.get(productId) ?? Array.from({ length: historyRange.length }, () => 0),
       defaultOrderQty: product?.defaultOrderQty ?? 1,
       lastFinalQty,
       addedCount,
       urgentNow: Boolean(row.urgent),
     })
-    const suggestedQty = Math.max(1, forecast.recommendedQty)
+    const reorderPlan = optimizeReorderPlan({
+      productName: product?.name ?? 'Produkt',
+      supplierName: product?.supplierName ?? 'Pa furnitor',
+      suggestedQty: forecast.recommendedQty,
+      forecastPerDay: forecast.forecastPerDay,
+      forecastNext7Days: forecast.forecastNext7Days,
+      aiRiskScore: forecast.riskScore,
+      aiRiskLevel: forecast.riskLevel,
+      urgentNow: Boolean(row.urgent),
+      unitPrice: product?.unitPrice,
+      leadTimeDays: product?.leadTimeDays,
+      minOrderQty: product?.minOrderQty,
+    })
+    const suggestedQty = Math.max(1, reorderPlan.optimizedQty)
     return {
       id: row.id,
       productId: row.product_id,
@@ -1437,11 +1624,21 @@ export async function getTodayShortages(
       note: row.note ?? '',
       addedCount,
       suggestedQty,
+      unitPrice: product?.unitPrice,
+      leadTimeDays: product?.leadTimeDays,
+      minOrderQty: product?.minOrderQty,
       aiSuggestedQty: forecast.recommendedQty,
       aiConfidence: forecast.confidence,
       aiRiskScore: forecast.riskScore,
       aiRiskLevel: forecast.riskLevel,
       aiReason: forecast.reason,
+      aiForecastPerDay: forecast.forecastPerDay,
+      aiForecastNext7Days: forecast.forecastNext7Days,
+      aiOptimizedQty: reorderPlan.optimizedQty,
+      aiCoverageDays: reorderPlan.coverageDays,
+      aiEstimatedCost: reorderPlan.estimatedCost,
+      aiOrderPriority: reorderPlan.priority,
+      aiOrderAction: reorderPlan.action,
       createdById: String(row.created_by ?? '').trim() || undefined,
       createdByRole: String(row.created_by_role ?? '').trim().toUpperCase() as
         | 'OWNER'
@@ -1516,20 +1713,23 @@ export async function deleteShortage(id: string): Promise<ShortageView[]> {
 
 export async function generateOrdersFromShortages(rows: ShortageView[]): Promise<OwnerOrder[]> {
   if (!isSupabaseConfigured) {
-    const mockRows: MockMissingItem[] = rows.map((r) => ({
-      id: r.id,
-      urgent: r.urgent,
-      note: r.note,
-      addedCount: r.addedCount,
-      suggestedQty: r.suggestedQty,
-      product: {
-        id: r.productId,
-        name: r.productName,
-        supplier: r.supplierName,
-        category: 'barna',
-      },
-    }))
-    return buildOrdersFromShortagesMock(mockRows)
+    const grouped = new Map<string, ShortageView[]>()
+    rows
+      .filter((r) => r.suggestedQty > 0)
+      .forEach((row) => {
+        const current = grouped.get(row.supplierName) ?? []
+        current.push(row)
+        grouped.set(row.supplierName, current)
+      })
+    return [...grouped.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], 'sq-AL'))
+      .map(([supplier, items], index) => ({
+        id: 100 + index,
+        supplier,
+        items: items.map((row) => `${row.suggestedQty} x ${row.productName}${row.urgent ? ' (URGJENT)' : ''}`),
+        status: 'DRAFT',
+        ...buildOrderDetails(items),
+      }))
   }
 
   const { data: authData } = await supabase.auth.getUser()
@@ -1610,20 +1810,21 @@ export async function generateOrdersFromShortages(rows: ShortageView[]): Promise
     }
     if (!orderId) continue
 
+    const details = buildOrderDetails(items)
     const orderItemsPayload = items.map((r) => ({
       company_id: companyId,
       order_id: orderId,
       product_id: r.productId,
       suggested_qty: r.suggestedQty,
       final_qty: r.suggestedQty,
-      note: r.note ?? '',
+      note: [r.note?.trim(), r.aiOrderAction?.trim()].filter(Boolean).join(' | '),
     }))
     await supabase.from('order_items').insert(orderItemsPayload)
 
     const renderedItems = items.map(
       (r) => `${r.suggestedQty} ${r.productName}${r.urgent ? ' URGJENT' : ''}`
     )
-    const receipt = `POROSI MUNGESASH
+    const legacyReceipt = `POROSI MUNGESASH
 Data: ${new Date().toLocaleString('sq-AL')}
 Furnitori: ${items[0].supplierName}
 ID: ${orderId}
@@ -1631,9 +1832,22 @@ ID: ${orderId}
 ${renderedItems.join('\n')}
 Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
 
+    void legacyReceipt
+    const orderUiId = stableOrderUiId(orderId, created.length + 100)
+    const order: OwnerOrder = {
+      id: orderUiId,
+      dbId: orderId,
+      supplier: items[0].supplierName,
+      items: items.map((r) => `${r.suggestedQty} x ${r.productName}${r.urgent ? ' (URGJENT)' : ''}`),
+      status: 'DRAFT',
+      ...details,
+    }
+    const receipt = formatOwnerOrderReceipt(order)
+
     await supabase.from('orders').update({ receipt_text: receipt }).eq('id', orderId).eq('company_id', companyId)
 
     created.push({
+      ...order,
       id: stableOrderUiId(orderId, created.length + 100),
       dbId: orderId,
       supplier: items[0].supplierName,
@@ -1655,7 +1869,7 @@ export async function getRecentOrders(limit = 100): Promise<OwnerOrder[]> {
 
   const { data, error } = await supabase
     .from('orders')
-    .select('id,status,created_at,suppliers(name),order_items(final_qty,suggested_qty,products(name))')
+    .select('id,status,created_at,receipt_text,suppliers(name),order_items(final_qty,suggested_qty,products(name))')
     .eq('company_id', companyId)
     .gte('created_at', since.toISOString())
     .order('created_at', { ascending: false })
@@ -1672,12 +1886,14 @@ export async function getRecentOrders(limit = 100): Promise<OwnerOrder[]> {
     })
     const dbId = String(row.id)
     const rawStatus = String(row.status ?? '').toUpperCase()
+    const aiMeta = parseOwnerOrderReceiptAi(String(row.receipt_text ?? ''))
     return {
       id: stableOrderUiId(dbId, 1000 + idx),
       dbId,
       supplier: row.suppliers?.name ?? 'Pa furnitor',
       items,
       status: rawStatus === 'SENT' ? 'SENT' : 'DRAFT',
+      ...aiMeta,
     } satisfies OwnerOrder
   })
 }

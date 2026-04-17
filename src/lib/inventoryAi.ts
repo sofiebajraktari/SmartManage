@@ -71,6 +71,31 @@ export interface SupplierAlternativeRecommendation {
   reasons: string[]
 }
 
+export type AiOrderPriority = 'LOW' | 'MEDIUM' | 'HIGH'
+
+export interface AiReorderPlanInput {
+  productName: string
+  supplierName: string
+  suggestedQty: number
+  forecastPerDay?: number
+  forecastNext7Days?: number
+  aiRiskScore?: number
+  aiRiskLevel?: AiRiskLevel
+  urgentNow?: boolean
+  unitPrice?: number
+  leadTimeDays?: number
+  minOrderQty?: number
+}
+
+export interface AiReorderPlan {
+  optimizedQty: number
+  coverageDays: number
+  estimatedCost: number | null
+  priority: AiOrderPriority
+  priorityScore: number
+  action: string
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
@@ -189,6 +214,75 @@ function labelReasons(label: SupplierAlternativeRecommendation['label']): string
   if (label === 'FASTEST') return 'lead time me i shpejte'
   if (label === 'BEST_VALUE') return 'vlere me e mire ekonomike'
   return 'pershtatje e forte me produktin'
+}
+
+function toOrderPriority(score: number): AiOrderPriority {
+  if (score >= 80) return 'HIGH'
+  if (score >= 55) return 'MEDIUM'
+  return 'LOW'
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+export function optimizeReorderPlan(input: AiReorderPlanInput): AiReorderPlan {
+  const suggestedQty = Math.max(1, Math.round(Number(input.suggestedQty ?? 1)))
+  const derivedForecastPerDay = Math.max(
+    0.2,
+    Number(input.forecastPerDay ?? 0) > 0
+      ? Number(input.forecastPerDay ?? 0)
+      : Number(input.forecastNext7Days ?? 0) / 7
+  )
+  const leadTimeDays = clamp(Math.round(Math.max(1, Number(input.leadTimeDays ?? (input.urgentNow ? 1 : 2)))), 1, 30)
+  const minOrderQty = Math.max(1, Math.round(Number(input.minOrderQty ?? 1)))
+  const riskScore = clamp(Math.round(Number(input.aiRiskScore ?? 0)), 0, 100)
+  const riskLevel = input.aiRiskLevel ?? toRiskLevel(riskScore)
+  const unitPrice = Number(input.unitPrice)
+  const currentCoverageDays = suggestedQty / Math.max(derivedForecastPerDay, 0.25)
+  const safetyDays =
+    input.urgentNow || riskLevel === 'HIGH' ? 6 : riskLevel === 'MEDIUM' ? 4 : 3
+  const leadDemand = Math.ceil(derivedForecastPerDay * leadTimeDays)
+  const safetyStock = Math.ceil(derivedForecastPerDay * safetyDays)
+  const volatilityBuffer = riskScore >= 70 ? 2 : riskScore >= 45 ? 1 : 0
+  let optimizedQty = Math.max(suggestedQty, leadDemand + safetyStock + volatilityBuffer, minOrderQty)
+
+  if (input.urgentNow) optimizedQty = Math.max(optimizedQty, suggestedQty + 1)
+  if (minOrderQty > 1) optimizedQty = Math.ceil(optimizedQty / minOrderQty) * minOrderQty
+  optimizedQty = clamp(Math.round(optimizedQty), 1, 999)
+
+  const coverageDays = roundOne(optimizedQty / Math.max(derivedForecastPerDay, 0.25))
+  const estimatedCost =
+    Number.isFinite(unitPrice) && unitPrice > 0 ? roundMoney(optimizedQty * unitPrice) : null
+
+  const coverageGap = Math.max(0, leadTimeDays + safetyDays - currentCoverageDays)
+  const priorityScore = clamp(
+    Math.round(
+      riskScore * 0.55 +
+        (input.urgentNow ? 18 : 0) +
+        Math.min(16, leadTimeDays * 3) +
+        Math.min(22, coverageGap * 7)
+    ),
+    0,
+    100
+  )
+  const priority = toOrderPriority(priorityScore)
+
+  const action =
+    priority === 'HIGH'
+      ? `Porosi sot me ${optimizedQty} njesi; mbulim rreth ${coverageDays} dite.`
+      : priority === 'MEDIUM'
+        ? `Planifiko porosine brenda 24 oresh me ${optimizedQty} njesi.`
+        : `Ri-porosi rutine me ${optimizedQty} njesi per ritmin aktual.`
+
+  return {
+    optimizedQty,
+    coverageDays,
+    estimatedCost,
+    priority,
+    priorityScore,
+    action,
+  }
 }
 
 export function forecastProductDemand(input: AiProductCandidate): AiDemandForecast {

@@ -17,6 +17,7 @@ import {
   deleteSupplier,
   deleteProduct,
   deleteShortage,
+  formatOwnerOrderReceipt,
   generateOrdersFromShortages,
   getPreferredProductByName,
   getCompanyDetails,
@@ -1755,6 +1756,7 @@ export function renderPronari(
   }
 
   function buildReceipt(order: OwnerOrder): string {
+    return formatOwnerOrderReceipt(order)
     const date = new Date().toLocaleString('sq-AL')
     return `POROSI MUNGESASH
 Data: ${date}
@@ -2017,6 +2019,22 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                 AI ${s.aiRiskLevel === 'HIGH' ? 'Rrezik i larte' : s.aiRiskLevel === 'MEDIUM' ? 'Rrezik mesatar' : 'Rrezik i ulet'}
               </span>
             </div>
+            <div class="flex flex-wrap items-center gap-1 text-[10px] text-slate-600">
+              ${
+                s.aiOrderPriority
+                  ? `<span class="rounded-full border px-1.5 py-0.5 font-semibold ${
+                      s.aiOrderPriority === 'HIGH'
+                        ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700'
+                        : s.aiOrderPriority === 'MEDIUM'
+                          ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                          : 'border-slate-200 bg-slate-50 text-slate-600'
+                    }">AI porosi ${s.aiOrderPriority}</span>`
+                  : ''
+              }
+              ${s.aiCoverageDays != null ? `<span>Mbulim ${s.aiCoverageDays.toFixed(1)}d</span>` : ''}
+              ${s.leadTimeDays != null ? `<span>Lead ${s.leadTimeDays}d</span>` : ''}
+              ${s.aiEstimatedCost != null ? `<span>Kosto ~${s.aiEstimatedCost.toFixed(2)} EUR</span>` : ''}
+            </div>
           </div>
         </td>
         <td data-label="Furnitori" class="owner-supplier-cell px-3 py-3 text-slate-700 text-xs">
@@ -2043,6 +2061,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
             ${s.note ? `<span class="owner-note-text text-[11px] text-slate-600 max-w-40 truncate">${s.note}</span>` : ''}
             ${s.createdByLabel ? `<span class="owner-note-text text-[10px] text-blue-700">nga ${s.createdByLabel}${s.createdByRole ? ` (${s.createdByRole})` : ''}</span>` : ''}
             ${s.aiReason ? `<span class="w-full text-[10px] text-slate-500">AI: ${s.aiReason}</span>` : ''}
+            ${s.aiOrderAction ? `<span class="w-full text-[10px] text-indigo-700">AI reorder: ${s.aiOrderAction}</span>` : ''}
             ${topAlternative ? `<span class="w-full text-[10px] text-emerald-700">${recommendationCopy}</span>` : ''}
           </div>
         </td>
@@ -2105,7 +2124,102 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     return `<span class="owner-order-status owner-order-status-pending inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">E padërguar</span>`
   }
 
+  function renderOrdersPanelEnhanced(): string {
+    const ordersToRender = currentSection === 'mungesat' ? generatedOrders : showAllOrders ? allOrders : generatedOrders
+    if (!ordersToRender.length) {
+      if (currentSection === 'mungesat') {
+        return `<div class="premium-empty">
+          <div class="premium-empty-title">Nuk ka porosi te gjeneruara per sot</div>
+          <p class="premium-empty-copy">Kliko "Gjenero porosite e dites se sotme" per t'i krijuar porosite.</p>
+        </div>`
+      }
+      return `<div class="premium-empty">
+        <div class="premium-empty-title">${showAllOrders ? 'Nuk ka porosi ne histori' : 'Nuk ka porosi te gjeneruara tani'}</div>
+        <p class="premium-empty-copy">${
+          showAllOrders
+            ? 'Ende nuk ka porosi te ruajtura.'
+            : 'Kliko "Gjenero porosite sipas furnitorit" per te krijuar porosite.'
+        }</p>
+      </div>`
+    }
+    return `
+      <div class="owner-orders-table-wrap overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <table class="min-w-full text-xs">
+          <thead class="owner-orders-head ui-table-head bg-slate-100 text-slate-700">
+            <tr>
+              <th class="px-3 py-2.5 text-left font-semibold">ID</th>
+              <th class="px-3 py-2.5 text-left font-semibold">Produkti</th>
+              <th class="px-3 py-2.5 text-left font-semibold">Sasia</th>
+              <th class="px-3 py-2.5 text-left font-semibold">Status</th>
+              <th class="px-3 py-2.5 text-right font-semibold">Veprime</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${ordersToRender
+              .map((o) => {
+                const qtySum = o.items.reduce((sum, item) => {
+                  const m = item.match(/^(\d+)/)
+                  if (!m) return sum
+                  return sum + Number(m[1])
+                }, 0)
+                const productList = o.items.map((item) => item.replace(/^\d+\s*[xÃ—]\s*/i, '')).join(', ')
+                const aiPriorityClass =
+                  o.aiPriority === 'HIGH'
+                    ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700'
+                    : o.aiPriority === 'MEDIUM'
+                      ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-600'
+                return `
+                  <tr class="owner-order-row border-t border-slate-200 hover:bg-slate-50/80 transition-colors">
+                    <td data-label="ID" class="owner-order-id px-3 py-3 font-semibold text-blue-700">#${o.id}</td>
+                    <td data-label="Produkti" class="owner-order-product-cell px-3 py-3 text-slate-700">
+                      <p class="owner-order-product-name font-medium text-slate-800">${o.supplier}</p>
+                      <p class="owner-order-product-list mt-0.5 max-w-[320px] truncate text-[11px] text-slate-500">${productList || '-'}</p>
+                      ${
+                        o.aiPriority || o.aiEstimatedCost != null || o.aiMaxLeadTimeDays != null || o.aiCoverageDays != null
+                          ? `<div class="mt-1.5 flex flex-wrap items-center gap-1 text-[10px]">
+                              ${
+                                o.aiPriority
+                                  ? `<span class="rounded-full border px-1.5 py-0.5 font-semibold ${aiPriorityClass}">AI ${o.aiPriority}</span>`
+                                  : ''
+                              }
+                              ${o.aiCoverageDays != null ? `<span class="rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-slate-600">Mbulim ${o.aiCoverageDays.toFixed(1)}d</span>` : ''}
+                              ${o.aiMaxLeadTimeDays != null ? `<span class="rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-slate-600">Lead ${o.aiMaxLeadTimeDays}d</span>` : ''}
+                              ${o.aiEstimatedCost != null ? `<span class="rounded-full border border-slate-200 bg-white px-1.5 py-0.5 text-slate-600">~${o.aiEstimatedCost.toFixed(2)} EUR</span>` : ''}
+                            </div>`
+                          : ''
+                      }
+                      ${o.aiSummary ? `<p class="mt-1 text-[10px] text-slate-500">${o.aiSummary}</p>` : ''}
+                    </td>
+                    <td data-label="Sasia" class="owner-order-qty px-3 py-3 text-slate-700 font-medium">${qtySum || o.items.length}</td>
+                    <td data-label="Status" class="px-3 py-3">${renderOrderStatus(o.status)}</td>
+                    <td data-label="Veprime" class="px-3 py-3">
+                      <div class="flex items-center justify-end gap-1.5">
+                        <button data-action="copy" data-order-id="${o.id}" data-order-db-id="${o.dbId ?? ''}" title="Kopjo reciptin per WhatsApp" aria-label="Kopjo reciptin per WhatsApp" class="ui-icon-btn">
+                          ${iconCopy}
+                        </button>
+                        <button data-action="download-pdf" data-order-id="${o.id}" data-order-db-id="${o.dbId ?? ''}" title="Shkarko PDF" aria-label="Shkarko PDF" class="ui-icon-btn">
+                          ${iconPdf}
+                        </button>
+                        <button data-action="whatsapp" data-order-id="${o.id}" data-order-db-id="${o.dbId ?? ''}" title="Hap WhatsApp me reciptin" aria-label="Hap WhatsApp me reciptin" class="ui-icon-btn">
+                          ${iconWhatsapp}
+                        </button>
+                        <button data-action="mark-sent" data-order-id="${o.id}" data-order-db-id="${o.dbId ?? ''}" title="Sheno porosine si E derguar" aria-label="Sheno porosine si E derguar" class="ui-icon-btn">
+                          ${iconCheck}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>`
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    `
+  }
+
   function renderOrdersPanel(): string {
+    return renderOrdersPanelEnhanced()
     const ordersToRender = currentSection === 'mungesat' ? generatedOrders : showAllOrders ? allOrders : generatedOrders
     if (!ordersToRender.length) {
       if (currentSection === 'mungesat') {

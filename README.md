@@ -20,6 +20,7 @@ Stack-u kryesor:
 - dashboard-i perfshin parashikim lokal te mungesave, zbulim anomalish dhe prioritete AI per ri-porosi
 - sasia e sugjeruar ne mungesa llogaritet nga nje motor AI lokal bazuar ne histori 30-ditore, urgjence dhe ritmin e kerkeses
 - sistemi sugjeron edhe furnitor alternativ me AI duke perdorur ngjashmeri produkti, preferencat e owner-it, cmimin, lead time dhe prioritetin e ofertes
+- AI optimizon edhe ri-porosine me `priority`, `coverage days`, `estimated cost` dhe `lead time`, te dukshme te mungesat dhe te porosite e gjeneruara
 - porosite mund te kopjohen, shkarkohen si PDF dhe te shenohen si `SENT`
 - te dhenat jane te ndara sipas kompanise
 - `public.mungesat` perdoret me `Realtime`
