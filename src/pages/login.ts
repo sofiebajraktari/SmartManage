@@ -17,19 +17,19 @@ const iconMail = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ari
 const iconLock = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="4" y="11" width="16" height="9" rx="2" ry="2" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V8a4 4 0 118 0v3"/></svg>`
 
 function mapLoginError(err: unknown): string {
-  const fallback = 'Kycja deshtoi.'
+  const fallback = 'Kyçja dështoi.'
   if (!(err instanceof Error)) return fallback
   const msg = err.message || fallback
   const lower = msg.toLowerCase()
 
   if (lower.includes('invalid login credentials')) {
-    return 'Email ose username, ose fjalekalimi, nuk eshte i sakte.'
+    return 'Username ose fjalëkalim i pasaktë.'
   }
   if (lower.includes('email not confirmed')) {
-    return 'Verifiko emailin para kycjes.'
+    return 'Verifiko emailin para kyçjes.'
   }
   if (lower.includes('rate limit')) {
-    return 'Shume tentativa. Prit pak dhe provo perseri.'
+    return 'Shumë tentativa. Prit pak dhe provo përsëri.'
   }
   return msg
 }
@@ -39,10 +39,6 @@ export function renderLogin(container: HTMLElement): void {
   const switchIntent = sessionStorage.getItem(AUTH_SWITCH_KEY)
   if (switchIntent) sessionStorage.removeItem(AUTH_SWITCH_KEY)
   const enterClass = switchIntent ? `auth-enter auth-enter-to-login` : ''
-  const panelTitle = recoveryMode ? 'Rikthe hyrjen pa humbur ritmin e dites' : 'Hyr dhe vazhdo rrjedhen e punes pa nderprerje'
-  const panelCopy = recoveryMode
-    ? 'Rivendos fjalekalimin dhe kthehu te mungesat, porosite dhe ekipi pa kaluar ne hapa te panevojshem.'
-    : 'Mungesat, porosite dhe qasja e ekipit qendrojne te lidhura ne nje panel te vetem, me fokus te qarte ne operimin ditor.'
 
   container.innerHTML = `
     <div class="auth-neo-page">
@@ -55,15 +51,8 @@ export function renderLogin(container: HTMLElement): void {
             </div>
 
             <header class="auth-header">
-              <h1 class="auth-title">${recoveryMode ? 'Vendos fjalekalim te ri' : 'Kycu ne panel'}</h1>
-              <p class="auth-subtitle">${recoveryMode ? 'Zgjidh fjalekalimin e ri per llogarine tende.' : 'Hyr dhe menaxho mungesat e dites pa kaluar ne menu te panevojshme.'}</p>
-              <div class="auth-neo-inline-badges">
-                ${
-                  recoveryMode
-                    ? '<span>Rikuperim i sigurt</span><span>Minimum 6 karaktere</span>'
-                    : '<span>Realtime</span><span>Role te ndara</span><span>Porosi sipas furnitorit</span>'
-                }
-              </div>
+              <h1 class="auth-title">${recoveryMode ? 'Vendos fjalëkalim të ri' : 'Kyçu në panel'}</h1>
+              <p class="auth-subtitle">${recoveryMode ? 'Zgjidh fjalëkalimin e ri për llogarinë tënde.' : 'Hyr dhe menaxho mungesat e ditës.'}</p>
             </header>
 
             <form id="login-form" class="auth-form auth-login-form">
@@ -71,99 +60,61 @@ export function renderLogin(container: HTMLElement): void {
                 recoveryMode
                   ? `
               <div class="auth-field">
-                <label for="password" class="auth-label">Fjalekalimi i ri</label>
+                <label for="password" class="auth-label">Fjalëkalimi i ri</label>
                 <div class="auth-password-wrap">
                   <span class="auth-input-icon" aria-hidden="true">${iconLock}</span>
                   <input type="password" id="password" name="password" required minlength="6" placeholder="Minimum 6 karaktere" autocomplete="new-password" class="auth-input auth-input-password auth-input-has-icon" />
-                  <button type="button" id="toggle-login-password" class="auth-password-toggle" aria-label="Shfaq fjalekalimin" title="Shfaq/fshih fjalekalimin">${iconEye}</button>
+                  <button type="button" id="toggle-login-password" class="auth-password-toggle" aria-label="Shfaq fjalëkalimin" title="Shfaq/fshih fjalëkalimin">${iconEye}</button>
                 </div>
               </div>
               <div class="auth-field">
-                <label for="password-confirm" class="auth-label">Perserite fjalekalimin</label>
+                <label for="password-confirm" class="auth-label">Përsërite fjalëkalimin</label>
                 <div class="auth-input-with-icon">
                   <span class="auth-input-icon" aria-hidden="true">${iconLock}</span>
-                  <input type="password" id="password-confirm" name="passwordConfirm" required minlength="6" placeholder="Perserite fjalekalimin" autocomplete="new-password" class="auth-input auth-input-has-icon" />
+                  <input type="password" id="password-confirm" name="passwordConfirm" required minlength="6" placeholder="Përsërite fjalëkalimin" autocomplete="new-password" class="auth-input auth-input-has-icon" />
                 </div>
               </div>
               `
                   : `
               <div class="auth-field">
-                <label for="username" class="auth-label">Email ose username</label>
+                <label for="username" class="auth-label">Username</label>
                 <div class="auth-input-with-icon">
                   <span class="auth-input-icon" aria-hidden="true">${iconMail}</span>
-                  <input type="text" id="username" name="username" required placeholder="Shkruaj email ose username" autocomplete="username" class="auth-input auth-input-has-icon" />
+                  <input type="text" id="username" name="username" required placeholder="Shkruaj username" autocomplete="username" class="auth-input auth-input-has-icon" />
                 </div>
               </div>
               <div class="auth-field">
-                <label for="password" class="auth-label">Fjalekalimi</label>
+                <label for="password" class="auth-label">Fjalëkalimi</label>
                 <div class="auth-password-wrap">
                   <span class="auth-input-icon" aria-hidden="true">${iconLock}</span>
                   <input type="password" id="password" name="password" required placeholder="••••••••" autocomplete="current-password" class="auth-input auth-input-password auth-input-has-icon" />
-                  <button type="button" id="toggle-login-password" class="auth-password-toggle" aria-label="Shfaq fjalekalimin" title="Shfaq/fshih fjalekalimin">${iconEye}</button>
+                  <button type="button" id="toggle-login-password" class="auth-password-toggle" aria-label="Shfaq fjalëkalimin" title="Shfaq/fshih fjalëkalimin">${iconEye}</button>
                 </div>
               </div>
               <div class="auth-login-options">
                 <label class="auth-remember">
                   <input type="checkbox" id="remember-me" />
-                  <span>Ruaje username-in ne kete pajisje</span>
+                  <span>Remember me</span>
                 </label>
               </div>
               `
               }
               <p id="login-error" class="auth-error" aria-live="polite"></p>
-              <button type="submit" id="login-btn" class="auth-primary-button">${recoveryMode ? 'Ruaj fjalekalimin' : 'Kycu'}</button>
-              <p class="auth-neo-footnote">
-                ${
-                  recoveryMode
-                    ? 'Pas ruajtjes do te rikthehesh te faqja e kycjes.'
-                    : 'Mund te hysh me email ose username. Nese e aktivizon opsionin siper, ruajme vetem username-in ne kete browser.'
-                }
-              </p>
+              <button type="submit" id="login-btn" class="auth-primary-button">${recoveryMode ? 'Ruaj fjalëkalimin' : 'Kyçu'}</button>
             </form>
           </div>
         </section>
 
         <aside class="auth-neo-panel">
-          <div class="auth-brand-pill">OPERIM DITOR</div>
-          <h2 class="auth-neo-panel-title">${panelTitle}</h2>
+          <h2 class="auth-neo-panel-title">Menaxho gjithçka në një vend</h2>
           <p class="auth-neo-panel-copy auth-neo-panel-copy-min">
-            ${panelCopy}
+            Nga mungesat tek porositë, çdo hap i operimit ditor qëndron i sinkronizuar në një rrjedhë të vetme.
           </p>
-          <ul class="auth-neo-panel-notes">
-            <li>Mungesat shfaqen live dhe kalojne drejt te gjenerimi i porosive pa refresh manual.</li>
-            <li>Qasja sipas rolit mban te paster rrjedhen e punes per owner, manager dhe worker.</li>
-            <li>Te dhenat ndahen sipas kompanise qe ekipi te punoje pa konfuzion.</li>
-          </ul>
-          <div class="auth-neo-side-art" aria-hidden="true">
-            <div class="auth-neo-preview-top"><span></span><span></span><span></span></div>
-            <div class="auth-neo-preview-kpis"><div></div><div></div><div></div></div>
-            <div class="auth-neo-preview-table">
-              <span></span><span></span><span></span><span></span>
-              <span></span><span></span><span></span><span></span>
-            </div>
-          </div>
-          <div class="auth-neo-panel-metrics">
-            <div class="auth-neo-metric-card">
-              <strong>Live</strong>
-              <span>Mungesat dhe porosite qendrojne te sinkronizuara ne te njejten rrjedhe.</span>
-            </div>
-            <div class="auth-neo-metric-card">
-              <strong>Te pastra</strong>
-              <span>Owner-i sheh panoramen, worker-i hyn drejt te veprimi.</span>
-            </div>
-            <div class="auth-neo-metric-card">
-              <strong>Te ndara</strong>
-              <span>Secila kompani sheh vetem te dhenat e veta.</span>
-            </div>
-          </div>
-          <p class="auth-neo-panel-signature">${recoveryMode ? 'Rikuperim i sigurt i aksesit' : 'Projektuar per ritmin e farmacise'}</p>
-          <p class="auth-neo-panel-tagline">${recoveryMode ? 'Akses i kthyer, rrjedhe e njejte' : 'Mungesat, porosite, ekipi'}</p>
-          <p class="text-xs text-slate-500">${recoveryMode ? '' : 'Llogarite krijohen vetem nga administratori.'}</p>
+          <p class="text-xs text-slate-500">${recoveryMode ? '' : 'Llogaritë krijohen vetëm nga administratori.'}</p>
         </aside>
       </div>
     </div>
   `
-
   const form = document.getElementById('login-form') as HTMLFormElement
   const errorEl = document.getElementById('login-error')!
   const btn = document.getElementById('login-btn') as HTMLButtonElement
@@ -224,7 +175,7 @@ export function renderLogin(container: HTMLElement): void {
     const isPassword = passwordInput.type === 'password'
     passwordInput.type = isPassword ? 'text' : 'password'
     togglePasswordBtn.innerHTML = isPassword ? iconEyeOff : iconEye
-    togglePasswordBtn.setAttribute('aria-label', isPassword ? 'Fshih fjalekalimin' : 'Shfaq fjalekalimin')
+    togglePasswordBtn.setAttribute('aria-label', isPassword ? 'Fshih fjalëkalimin' : 'Shfaq fjalëkalimin')
   })
 
   form.addEventListener('submit', async (e) => {
@@ -240,30 +191,30 @@ export function renderLogin(container: HTMLElement): void {
     clearInputError(usernameEl, passwordEl, passwordConfirmEl)
     if (!recoveryMode && !username) {
       markInputError(usernameEl)
-      setError('Shkruaj email ose username.')
+      setError('Shkruaj username.')
       return
     }
-    if (!recoveryMode && !username.includes('@') && !/^[a-z0-9._\-]{3,32}$/i.test(username)) {
+    if (!recoveryMode && !/^[a-z0-9._\-]{3,32}$/i.test(username)) {
       markInputError(usernameEl)
-      setError('Username duhet te kete 3-32 karaktere dhe vetem a-z, 0-9, ., _, -.')
+      setError('Username duhet të ketë 3-32 karaktere dhe vetëm a-z, 0-9, ., _, -.')
       return
     }
     if (recoveryMode) {
       if (password.length < 6) {
         markInputError(passwordEl, passwordConfirmEl)
-        setError('Fjalekalimi duhet te kete te pakten 6 karaktere.')
+        setError('Fjalëkalimi duhet të ketë të paktën 6 karaktere.')
         return
       }
       if (password !== passwordConfirm) {
         markInputError(passwordEl, passwordConfirmEl)
-        setError('Fjalekalimet nuk perputhen.')
+        setError('Fjalëkalimet nuk përputhen.')
         return
       }
     }
     btn.disabled = true
     btn.classList.add('auth-btn-loading')
     const originalBtnLabel = btn.textContent
-    btn.textContent = recoveryMode ? 'Duke ruajtur...' : 'Duke u kycur...'
+    btn.textContent = recoveryMode ? 'Duke ruajtur...' : 'Duke u kyçur...'
     try {
       if (recoveryMode) {
         await completePasswordRecovery(password)
@@ -283,7 +234,7 @@ export function renderLogin(container: HTMLElement): void {
       redirectByRole(profile.role)
     } catch (err) {
       markInputError(recoveryMode ? passwordEl : usernameEl, passwordEl, passwordConfirmEl)
-      setError(recoveryMode ? (err instanceof Error ? err.message : 'Ruajtja e fjalekalimit deshtoi.') : mapLoginError(err))
+      setError(recoveryMode ? (err instanceof Error ? err.message : 'Ruajtja e fjalëkalimit dështoi.') : mapLoginError(err))
       btn.disabled = false
       btn.textContent = originalBtnLabel
       btn.classList.remove('auth-btn-loading')
@@ -308,14 +259,14 @@ export function renderLogin(container: HTMLElement): void {
       const resetSuccess = sessionStorage.getItem(RESET_SUCCESS_KEY)
       if (resetSuccess) {
         sessionStorage.removeItem(RESET_SUCCESS_KEY)
-        setSuccess('Fjalekalimi u ndryshua. Tani kycu me fjalekalimin e ri.')
+        setSuccess('Fjalëkalimi u ndryshua. Tani kyçu me fjalëkalimin e ri.')
       }
     } catch {
     }
     if (authNotice === 'session-conflict') {
-      setError('Kjo llogari u hap ne nje pajisje tjeter. Kycu perseri vetem nese do ta perdorish ketu.')
+      setError('Kjo llogari u hap në një pajisje tjetër. Kyçu përsëri vetëm nëse do ta përdorësh këtu.')
     } else if (authNotice === 'inactive-user') {
-      setError('Ky perdorues eshte joaktiv. Kontakto administratorin.')
+      setError('Ky përdorues është joaktiv. Kontakto administratorin.')
     }
   }
 }
