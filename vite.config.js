@@ -1,0 +1,47 @@
+import { defineConfig } from 'vite'
+import { VitePWA } from 'vite-plugin-pwa'
+
+export default defineConfig({
+  root: '.',
+  build: {
+    outDir: 'out',
+    emptyOutDir: true,
+  },
+  plugins: [
+    VitePWA({
+      registerType: 'autoUpdate',
+      injectRegister: 'auto',
+      includeAssets: ['brand/smartmanage/logo.png'],
+      manifest: {
+        name: 'SmartManage',
+        short_name: 'SmartManage',
+        description: 'PWA per menaxhim mungesash dhe porosish ne farmaci.',
+        theme_color: '#0ea5e9',
+        background_color: '#f0f9ff',
+        display: 'standalone',
+        start_url: '/',
+        scope: '/',
+        icons: [
+          {
+            src: '/brand/smartmanage/logo.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'any maskable',
+          },
+          {
+            src: '/brand/smartmanage/logo.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'any maskable',
+          },
+        ],
+      },
+      workbox: {
+        globPatterns: ['**/*.{js,css,html,png,svg,ico}'],
+      },
+      devOptions: {
+        enabled: false,
+      },
+    }),
+  ],
+})
