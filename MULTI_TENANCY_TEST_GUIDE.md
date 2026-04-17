@@ -1,163 +1,207 @@
 # Multi-Tenancy Test Guide - SmartManage
 
-## Step 1: Create Companies in Supabase SQL Editor
+Ky udhezues ndjek flow-in aktual te aplikacionit:
 
-1. Shko në **Supabase Dashboard** → **SQL Editor**
-2. Kliko **New query**
-3. Ekzekuto këtë SQL për të krijuar 2 kompani:
+- `OWNER` krijohet nga UI me `signUp`
+- kompania bootstrap-ohet automatikisht me RPC `bootstrap_company_owner`
+- anetaret e ekipit krijohen nga `OWNER` me RPC `admin_create_user_email`
+
+## Para se te fillosh
+
+Sigurohu qe migrimet e Supabase jane aplikuar deri te te fundit, sidomos:
+
+- `20260326200000_bootstrap_company_owner_rpc.sql`
+- `20260329224500_admin_create_user_email_rpc.sql`
+- `20260331170000_admin_create_user_auth_schema_fix.sql`
+- `20260331193000_admin_update_user_password_rpc.sql`
+
+Nese do vetem kompani testuese bosh, mund te perdoresh edhe:
+
+- `supabase/migrations/00_TEST_SETUP_create_companies.sql`
+
+## Step 1: Krijo Owner-in e pare nga UI
+
+1. Nise aplikacionin me `npm run dev`.
+2. Hape `#/register`.
+3. Regjistro nje perdorues te ri me rol `OWNER`.
+4. Perdore nje email real ose testues, p.sh. `owner1@example.com`.
+
+Shenim:
+
+- ne login-in e pare aplikacioni therras `bootstrap_company_owner`
+- nese user metadata nuk ka `company_name` ose `company_code`, aplikacioni gjeneron vlera fallback nga username/email
+
+## Step 2: Verifiko bootstrap-in e kompanise se pare
+
+Ne Supabase SQL Editor, ekzekuto:
 
 ```sql
-INSERT INTO public.companies (name, code)
-VALUES 
-  ('Kompania Test 1', 'test-company-1'),
-  ('Kompania Test 2', 'test-company-2')
-ON CONFLICT (code) DO NOTHING;
+select id, name, code
+from public.companies
+order by created_at desc;
 
--- Zgjidh ID-të për shënimin
-SELECT id, name, code FROM public.companies WHERE code LIKE 'test-company%';
+select id, email, username, role, company_id, is_active
+from public.profiles
+where role = 'OWNER'
+order by created_at desc;
 ```
 
-Pas ekzekutimit, shënoji ID-të e dy kompanive (do duhen më vonë).
+Duhet te shohesh:
 
----
+- nje kompani te re
+- nje profil `OWNER` me `company_id` te plotesuar
 
-## Step 2: Create Admin Users (Manually in Database)
+## Step 3: Krijo Owner-in e dyte ne kompani tjeter
 
-Duke përdorur Supabase **SQL Editor**, ekzekuto këtë për secilën kompani:
+Per testim me dy kompani, perdor nje sesion te ndare browser-i:
 
-### Admin 1 - Kompania Test 1:
+1. Hap nje dritare incognito ose browser tjeter.
+2. Regjistro nje `OWNER` te dyte, p.sh. `owner2@example.com`.
+3. Ky user duhet te bootstrap-oje nje kompani te dyte, te ndare nga e para.
+
+Verifikim i shpejte:
+
 ```sql
--- Replace {COMPANY_1_ID} me ID-në e Kompanisë 1
-SELECT public.admin_create_user(
-  p_username := 'admin1',
-  p_password := 'Password123',
-  p_role := 'OWNER'
-);
+select id, name, code
+from public.companies
+where code is not null
+order by created_at desc;
 ```
 
-### Admin 2 - Kompania Test 2:
+Duhet te ekzistojne dy kompani te ndryshme.
+
+## Step 4: Krijo user-a te ekipit nga Settings
+
+Duke qene i kycur si `owner1`:
+
+1. Shko te `#/settings`.
+2. Krijo nje `WORKER`, p.sh. `worker1@example.com`.
+3. Krijo nje `MANAGER`, p.sh. `manager1@example.com`.
+
+Perserite te njejtin proces si `owner2`:
+
+1. Krijo `worker2@example.com`
+2. Krijo `manager2@example.com`
+
+Kjo rruge perdor RPC `admin_create_user_email`, jo SQL manual ne dashboard.
+
+## Step 5: Krijo te dhena ne secilen kompani
+
+Si `owner1`:
+
+1. Shto nje furnitor, p.sh. `Furnitor Kompania 1`
+2. Shto nje produkt, p.sh. `Produkt Test 1`
+3. Shto nje mungese per ate produkt
+
+Si `owner2`:
+
+1. Shto nje furnitor, p.sh. `Furnitor Kompania 2`
+2. Shto nje produkt, p.sh. `Produkt Test 2`
+3. Shto nje mungese per ate produkt
+
+## Step 6: Verifiko izolimin e te dhenave
+
+Testet minimale qe duhen kaluar:
+
+- `owner1` sheh vetem produktet, mungesat dhe ekipin e kompanise 1
+- `owner2` sheh vetem produktet, mungesat dhe ekipin e kompanise 2
+- `manager1` nuk duhet te shohe te dhenat e kompanise 2
+- `worker1` mund te shtoje mungesa, por jo te krijoje produkte ose te administroje ekipin
+
+Kontroll SQL per profilet:
+
 ```sql
--- Replace {COMPANY_2_ID} me ID-në e Kompanisë 2
-SELECT public.admin_create_user(
-  p_username := 'admin2',
-  p_password := 'Password123',
-  p_role := 'OWNER'
-);
+select email, username, role, company_id, is_active
+from public.profiles
+order by company_id, role, email;
 ```
 
-**SHËNIM:** Pas ekzekutimit, SQL-i do të kthejë `user_id`. Shënoji këto IDs.
+Kontroll SQL per produktet:
 
----
-
-## Step 3: Verify Admins Created
-
-Në SQL Editor, ekzekuto:
 ```sql
-SELECT id, email, username, role, company_id, is_active 
-FROM public.profiles 
-WHERE role = 'OWNER' AND company_id IN (
-  SELECT id FROM public.companies WHERE code LIKE 'test-company%'
+select id, name, company_id
+from public.products
+order by created_at desc;
+```
+
+## Step 7: Testo login me email dhe username
+
+Per shkak se aplikacioni mbeshtet edhe login me username:
+
+1. Kycu si nje user me email te plote.
+2. Dil nga llogaria.
+3. Kycu perseri me username, nese ai user ka username te ruajtur ne `profiles`.
+
+Nese kjo deshton, kontrollo nese ekziston RPC:
+
+```sql
+select public.lookup_login_email('owner1@example.com');
+```
+
+## Step 8: Testo ndryshimin e password-it nga OWNER
+
+Si `OWNER`, provo te ndryshosh password-in e nje user-i te kompanise tende nga UI.
+
+Nese do te verifikosh qe RPC ekziston:
+
+```sql
+select proname
+from pg_proc
+where proname in (
+  'bootstrap_company_owner',
+  'admin_create_user_email',
+  'admin_update_user_password',
+  'lookup_login_email'
 )
-ORDER BY created_at DESC;
+order by proname;
 ```
-
-Duhet të shohësh 2 OWNER users, secili në kompaninë e tij.
-
----
-
-## Step 4: Test Admin Login
-
-1. Shko në aplikacion dhe kliko **Login**
-2. Kyçu me e-mailin `admin1@smartmanage.local` dhe password `Password123`
-3. Duhet të hyjë në dashboard-in e **Kompanisë Test 1**
-
----
-
-## Step 5: Create Test Users (From SmartManage UI)
-
-Duke qenë i kyçur si `admin1`:
-
-1. Shko në **Settings**
-2. Në seksionin "Krijo përdorues të ri", shtoj:
-   - Username: `worker1`
-   - Password: `Password123`
-   - Role: `WORKER`
-3. Kliko **Krijo përdorues**
-4. Përsërite për `manager1` (Role: MANAGER)
-
-Përsërite të njëjtin proces si `admin2` me usernames `worker2`, `manager2`.
-
----
-
-## Step 6: Create Test Data
-
-**Si Admin 1:**
-1. Shto furnitor: "Furnitor Kompania 1"
-2. Shto produkt: "Produkt Test 1" (lidhur me furnitorin)
-3. Shto mungese: 10 njësi të produktit
-
-**Si Admin 2:**
-1. Shto furnitor: "Furnitor Kompania 2"
-2. Shto produkt: "Produkt Test 2" (lidhur me furnitorin)
-3. Shto mungese: 5 njësi të produktit
-
----
-
-## Step 7: Test Data Isolation
-
-### Test 1: Verify Admins Only See Own Company Data
-- Kyçu si `admin1` → Duhet të shohësh vetëm "Produkt Test 1" dhe "Furnitor Kompania 1"
-- Kyçu si `admin2` → Duhet të shohësh vetëm "Produkt Test 2" dhe "Furnitor Kompania 2"
-- **Nëse shohësh produktet e tjetrit, RLS nuk punon!**
-
-### Test 2: Verify Team Members Belong to Own Company
-- Kyçu si `admin1` → Në **Ekipa**, duhet të shohësh: admin1, worker1, manager1 (3 përdorues)
-- Kyçu si `admin2` → Në **Ekipa**, duhet të shohësh: admin2, worker2, manager2 (3 përdorues)
-- **Nëse shohësh adminë/usera të kompanisë tjetër, problem!**
-
-### Test 3: Verify Workers Can't Create/Delete Data
-- Kyçu si `worker1`
-- Provo të shtosh produkt → **Duhet të dështojë** (nuk ka përmi)
-- Provo të shtosh mungese → **Duhet të funksionojë** (WORKER mund të shtojë mungesat)
-
-### Test 4: Verify Dashboard Shows Correct Company Insights
-- Kyçu si `admin1` → Dashboard duhet të tregojë insight-e të "Produk Test 1" dhe "Furnitor Kompania 1"
-- Kyçu si `admin2` → Dashboard duhet të tregojë insight-e të "Produk Test 2" dhe "Furnitor Kompania 2"
-
----
-
-## Step 8: Check Browser Console for Errors
-
-Shitje F12 (Developer Tools) dhe:
-1. Shko në **Console**
-2. Shto produktin
-3. Nëse ka error sa përmes Supabase RLS, do të shohësh error message
-4. Nëse vrajos, mund të shohësh `PERMISSION_DENIED` ose `row-level security`
-
----
 
 ## Troubleshooting
 
-### "Nuk ka të dhëna" / "Shoh të dhëna të tjera"
-- Verifikoje nëse `current_company_id()` funcion-i punon:
-  ```sql
-  SELECT public.current_company_id();
-  ```
-  Duhet të kthejë company_id të user-it të logurit.
+### Owner regjistrohet por nuk merr kompani
 
-### "Nuk mund të krijohet user"
-- Verifiko nëse `admin_create_user_v2` RPC ekziston
-- Nëse jo, përdor migracionin `20260327110000_admin_create_user_and_login_lookup_fix.sql`
+Kontrollo:
 
-### Dashboard nuk shfaqet sipas kompanisë
-- Kontrollo në [src/lib/data.ts](src/lib/data.ts) nëse `getDashboardInsights()` filtron sipas `company_id`
+```sql
+select id, email, role, company_id
+from public.profiles
+order by created_at desc;
+```
 
----
+Nese `company_id` mbetet bosh, verifiko migrimin:
 
-## Key Points to Verify
+- `20260326200000_bootstrap_company_owner_rpc.sql`
 
-✅ Admin 1 sheh vetëm produktet e Kompanisë 1  
-✅ Admin 2 sheh vetëm produktet e Kompanisë 2  
-✅ Worker 1 nuk mund të shtoj produkt (Permission denied)  
-✅ Dashboard-i tregon insight-e të Kompanisë 1 për Admin 1  
-✅ Team lista tregon vetëm userat e Kompanisë 1 për Admin 1  
+### Krijimi i user-it nga Settings deshton
+
+RPC-ja e pritur nga frontend eshte:
+
+- `admin_create_user_email`
+
+Nese mungon, apliko:
+
+- `20260329224500_admin_create_user_email_rpc.sql`
+- `20260331170000_admin_create_user_auth_schema_fix.sql`
+
+Pastaj ekzekuto:
+
+```sql
+notify pgrst, 'reload schema';
+```
+
+### Login me username deshton
+
+Kontrollo nese ekziston:
+
+- `lookup_login_email`
+
+Nese mungon, apliko migrimet me te reja te auth/login flow.
+
+## Rezultati i pritur
+
+Multi-tenancy konsiderohet ne rregull kur:
+
+- cdo kompani sheh vetem te dhenat e veta
+- `OWNER` krijon user-at vetem brenda kompanise se vet
+- `MANAGER` dhe `WORKER` nuk kalojne kufijte e kompanise
+- login me email ose username funksionon per user-at aktiv
