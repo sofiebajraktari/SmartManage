@@ -13,6 +13,7 @@ import {
   adminUpdateUsername,
   adminUpdateUserRole,
   addProduct,
+  adjustProductStock,
   addSupplier,
   deleteSupplier,
   deleteProduct,
@@ -36,6 +37,7 @@ import {
   type CompanyDetails,
   type DashboardInsights,
   type ProductView,
+  type StockMovementType,
   type SupplierView,
   type ShortageView,
   type OwnerOrder,
@@ -47,6 +49,7 @@ const iconWhatsapp = `<svg class="h-4 w-4" fill="none" stroke="currentColor" vie
 const iconCheck = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>`
 const iconEdit = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>`
 const iconTrash = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 7h12M9 7V4h6v3m-7 4v6m4-6v6m4-6v6M8 20h8a2 2 0 002-2V7H6v11a2 2 0 002 2z" /></svg>`
+const iconStock = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4m8-8v16" /></svg>`
 const iconKpiShortage = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-6m3 6V7m3 10v-4m3 8H6a2 2 0 01-2-2V5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2z" /></svg>`
 const iconKpiOrders = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6M7 4h10l2 2v14H5V6l2-2z" /></svg>`
 const iconKpiAlert = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4m0 4h.01" /></svg>`
@@ -160,6 +163,24 @@ function getCompanyBrand(details: CompanyDetails): { name: string; logoUrl: stri
 
 function compareAlbanian(a: string, b: string): number {
   return a.localeCompare(b, 'sq-AL', { sensitivity: 'base', numeric: true })
+}
+
+function parseWholeNumberInput(value: string, fallback = 0): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return Math.trunc(fallback)
+  return Math.trunc(parsed)
+}
+
+function getProductStockThreshold(product: ProductView): number {
+  return Math.max(0, Number(product.reorderPoint ?? 0), Number(product.minStock ?? 0))
+}
+
+function getProductStockStatus(product: ProductView): 'out' | 'low' | 'ok' {
+  const stock = Number(product.currentStock ?? 0)
+  const threshold = getProductStockThreshold(product)
+  if (stock <= 0) return 'out'
+  if (stock <= threshold) return 'low'
+  return 'ok'
 }
 
 function isUuid(value: string): boolean {
@@ -342,7 +363,7 @@ export function renderPronari(
   let dashboardRangeDays: 7 | 14 | 30 = 7
   let productQuery = ''
   let supplierQuery = ''
-  let productSortBy: 'name' | 'supplier' | 'category' = 'name'
+  let productSortBy: 'name' | 'supplier' | 'category' | 'stock' = 'name'
   let ownerProductCategoryFilter: 'barna' | 'all' | 'front' = 'barna'
   let lastImportFileName = ''
   const suggestedQtyStorageKey = (() => {
@@ -1160,6 +1181,9 @@ export function renderPronari(
       if (productSortBy === 'category') {
         return compareAlbanian(categoryA, categoryB) || compareAlbanian(nameA, nameB)
       }
+      if (productSortBy === 'stock') {
+        return Number(a.currentStock ?? 0) - Number(b.currentStock ?? 0) || compareAlbanian(nameA, nameB)
+      }
       return compareAlbanian(nameA, nameB) || compareAlbanian(supplierA, supplierB)
     })
   }
@@ -1178,6 +1202,9 @@ export function renderPronari(
         supplierName: shortage.supplierName,
         category: 'barna',
         aliases: [],
+        currentStock: 0,
+        minStock: 0,
+        reorderPoint: 0,
       } satisfies ProductView)
     return recommendAlternativeSuppliers({
       currentProduct: {
@@ -1402,6 +1429,9 @@ export function renderPronari(
           supplierName: initial.supplierName,
           category: 'barna',
           aliases: [],
+          currentStock: 0,
+          minStock: 0,
+          reorderPoint: 0,
         } satisfies ProductView)
       const recommended = getSupplierAlternativeRecommendations(initial, 6)
       const exactNameProducts = products
@@ -1509,6 +1539,8 @@ export function renderPronari(
     supplier: string
     category: 'barna' | 'front'
     aliases: string[]
+    minStock: number
+    reorderPoint: number
   } | null> {
     return new Promise((resolve) => {
       const overlay = document.createElement('div')
@@ -1533,10 +1565,21 @@ export function renderPronari(
                 <option value="front">Front</option>
               </select>
             </label>
+            <label class="text-sm text-slate-700">
+              Min stock
+              <input id="owner-edit-product-min-stock" type="number" min="0" step="1" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </label>
+            <label class="text-sm text-slate-700">
+              Reorder point
+              <input id="owner-edit-product-reorder-point" type="number" min="0" step="1" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </label>
             <label class="text-sm text-slate-700 md:col-span-2">
               Emra alternativë (ndarë me presje)
               <input id="owner-edit-product-aliases" type="text" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500" />
             </label>
+          </div>
+          <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            Stok aktual: <strong class="text-slate-900">${initial.currentStock}</strong>
           </div>
           <p id="owner-edit-product-error" class="mt-2 text-xs text-red-600"></p>
           <div class="mt-4 flex items-center justify-end gap-2">
@@ -1550,6 +1593,8 @@ export function renderPronari(
       const nameInput = overlay.querySelector<HTMLInputElement>('#owner-edit-product-name')
       const supplierInput = overlay.querySelector<HTMLInputElement>('#owner-edit-product-supplier')
       const categoryInput = overlay.querySelector<HTMLSelectElement>('#owner-edit-product-category')
+      const minStockInput = overlay.querySelector<HTMLInputElement>('#owner-edit-product-min-stock')
+      const reorderPointInput = overlay.querySelector<HTMLInputElement>('#owner-edit-product-reorder-point')
       const aliasesInput = overlay.querySelector<HTMLInputElement>('#owner-edit-product-aliases')
       const errorEl = overlay.querySelector<HTMLParagraphElement>('#owner-edit-product-error')
       const cancelBtn = overlay.querySelector<HTMLButtonElement>('#owner-edit-product-cancel')
@@ -1558,11 +1603,22 @@ export function renderPronari(
       if (nameInput) nameInput.value = initial.name
       if (supplierInput) supplierInput.value = initial.supplierName
       if (categoryInput) categoryInput.value = initial.category
+      if (minStockInput) minStockInput.value = String(Math.max(0, Number(initial.minStock ?? 0)))
+      if (reorderPointInput) reorderPointInput.value = String(Math.max(0, Number(initial.reorderPoint ?? 0)))
       if (aliasesInput) aliasesInput.value = initial.aliases.join(', ')
       nameInput?.focus()
 
       const close = (
-        value: { name: string; supplier: string; category: 'barna' | 'front'; aliases: string[] } | null
+        value:
+          | {
+              name: string
+              supplier: string
+              category: 'barna' | 'front'
+              aliases: string[]
+              minStock: number
+              reorderPoint: number
+            }
+          | null
       ) => {
         overlay.remove()
         resolve(value)
@@ -1584,7 +1640,113 @@ export function renderPronari(
         }
         const category = categoryInput?.value === 'front' ? 'front' : 'barna'
         const aliases = parseAliasesInput(aliasesInput?.value ?? '')
-        close({ name, supplier, category, aliases })
+        const minStock = Math.max(0, parseWholeNumberInput(minStockInput?.value ?? '0', 0))
+        const reorderPoint = Math.max(
+          0,
+          parseWholeNumberInput(reorderPointInput?.value ?? String(minStock), minStock)
+        )
+        close({ name, supplier, category, aliases, minStock, reorderPoint })
+      })
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close(null)
+      })
+    })
+  }
+
+  function openStockAdjustModal(initial: ProductView): Promise<{
+    quantityDelta: number
+    note: string
+    movementType: StockMovementType
+  } | null> {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div')
+      overlay.className = 'owner-modal-overlay fixed inset-0 z-[70] bg-slate-900/18 flex items-center justify-center p-4'
+      overlay.innerHTML = `
+        <div class="owner-modal-card w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+          <h3 class="mb-1 text-lg font-semibold text-slate-900">Korrigjo stokun</h3>
+          <p class="mb-4 text-sm text-slate-500">
+            ${initial.name} <span class="text-slate-400">•</span> ${initial.supplierName}
+          </p>
+          <div class="grid gap-3 md:grid-cols-2">
+            <label class="text-sm text-slate-700">
+              Veprimi
+              <select id="owner-stock-adjust-action" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="add">Shto ne stok</option>
+                <option value="remove">Hiq nga stoku</option>
+              </select>
+            </label>
+            <label class="text-sm text-slate-700">
+              Sasia
+              <input id="owner-stock-adjust-qty" type="number" min="1" step="1" value="1" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </label>
+            <label class="text-sm text-slate-700 md:col-span-2">
+              Shenim
+              <input id="owner-stock-adjust-note" type="text" placeholder="Arsyeja e korrigjimit (opsionale)" class="mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </label>
+          </div>
+          <div class="mt-4 grid gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+            <div class="flex items-center justify-between gap-2">
+              <span>Stok aktual</span>
+              <strong class="text-slate-900">${initial.currentStock}</strong>
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span>Stok pas ruajtjes</span>
+              <strong id="owner-stock-adjust-preview" class="text-slate-900">${initial.currentStock}</strong>
+            </div>
+          </div>
+          <p id="owner-stock-adjust-error" class="mt-2 text-xs text-red-600"></p>
+          <div class="mt-4 flex items-center justify-end gap-2">
+            <button type="button" id="owner-stock-adjust-cancel" class="premium-btn-ghost rounded-xl px-4 py-2 text-sm font-medium">Anulo</button>
+            <button type="button" id="owner-stock-adjust-save" class="premium-btn-primary rounded-xl px-4 py-2 text-sm font-semibold">Ruaj levizjen</button>
+          </div>
+        </div>
+      `
+      document.body.appendChild(overlay)
+
+      const actionInput = overlay.querySelector<HTMLSelectElement>('#owner-stock-adjust-action')
+      const qtyInput = overlay.querySelector<HTMLInputElement>('#owner-stock-adjust-qty')
+      const noteInput = overlay.querySelector<HTMLInputElement>('#owner-stock-adjust-note')
+      const previewEl = overlay.querySelector<HTMLElement>('#owner-stock-adjust-preview')
+      const errorEl = overlay.querySelector<HTMLParagraphElement>('#owner-stock-adjust-error')
+      const cancelBtn = overlay.querySelector<HTMLButtonElement>('#owner-stock-adjust-cancel')
+      const saveBtn = overlay.querySelector<HTMLButtonElement>('#owner-stock-adjust-save')
+
+      const updatePreview = (): void => {
+        const qty = Math.max(1, parseWholeNumberInput(qtyInput?.value ?? '1', 1))
+        const removing = actionInput?.value === 'remove'
+        const nextStock = Number(initial.currentStock ?? 0) + (removing ? -qty : qty)
+        if (previewEl) {
+          previewEl.textContent = String(nextStock)
+          previewEl.className = nextStock <= 0 ? 'text-rose-700' : nextStock <= getProductStockThreshold(initial) ? 'text-amber-700' : 'text-emerald-700'
+        }
+      }
+
+      updatePreview()
+      qtyInput?.focus()
+      actionInput?.addEventListener('change', updatePreview)
+      qtyInput?.addEventListener('input', updatePreview)
+
+      const close = (
+        value: { quantityDelta: number; note: string; movementType: StockMovementType } | null
+      ) => {
+        overlay.remove()
+        resolve(value)
+      }
+
+      cancelBtn?.addEventListener('click', () => close(null))
+      saveBtn?.addEventListener('click', () => {
+        const qty = Math.max(1, parseWholeNumberInput(qtyInput?.value ?? '0', 0))
+        if (!qty) {
+          if (errorEl) errorEl.textContent = 'Shkruaj nje sasi valide.'
+          qtyInput?.focus()
+          return
+        }
+        const removing = actionInput?.value === 'remove'
+        close({
+          quantityDelta: removing ? -qty : qty,
+          note: (noteInput?.value ?? '').trim(),
+          movementType: removing ? 'ADJUSTMENT_OUT' : 'ADJUSTMENT_IN',
+        })
       })
       overlay.addEventListener('click', (e) => {
         if (e.target === overlay) close(null)
@@ -3327,6 +3489,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
         const key = normalizeProductNameKey(p.name)
         duplicateNameCount.set(key, (duplicateNameCount.get(key) ?? 0) + 1)
       })
+      const lowStockCount = products.filter((product) => getProductStockStatus(product) !== 'ok').length
       productsList.innerHTML = productRows
         .slice(0, 40)
         .map(
@@ -3334,6 +3497,19 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
             const key = normalizeProductNameKey(p.name)
             const hasMultipleSuppliers = (duplicateNameCount.get(key) ?? 0) > 1
             const isPreferred = preferredProductByName[key] === p.id
+            const stockStatus = getProductStockStatus(p)
+            const stockBadgeClass =
+              stockStatus === 'out'
+                ? 'bg-rose-100 text-rose-700'
+                : stockStatus === 'low'
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'bg-emerald-100 text-emerald-700'
+            const stockLabel =
+              stockStatus === 'out'
+                ? 'Pa stok'
+                : stockStatus === 'low'
+                  ? 'Nen prag'
+                  : 'Ne rregull'
             return (
             `<li class="flex items-start justify-between gap-2 border-b border-slate-200 py-2 text-xs">
               <div class="min-w-0">
@@ -3343,6 +3519,12 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                   p.aliases.length ? p.aliases.join(', ') : 'pa emra alternativë'
                 }
                 </p>
+                <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                  <span class="rounded-full px-2 py-0.5 font-semibold ${stockBadgeClass}">${stockLabel}</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-700">Stok ${p.currentStock}</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600">Min ${p.minStock}</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600">RP ${p.reorderPoint}</span>
+                </div>
                 ${
                   hasMultipleSuppliers
                     ? `<div class="mt-1 inline-flex items-center gap-2">
@@ -3357,6 +3539,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                 }
               </div>
               <div class="inline-flex items-center gap-1.5">
+                <button data-action="adjust-stock" data-product-id="${p.id}" title="Korrigjo stokun" class="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100">${iconStock}</button>
                 <button data-action="edit-product" data-product-id="${p.id}" title="Ndrysho produktin" class="ui-icon-btn">${iconEdit}</button>
                 <button data-action="delete-product" data-product-id="${p.id}" title="Fshi produktin" class="ui-icon-btn">${iconTrash}</button>
               </div>
@@ -3366,6 +3549,8 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
         .join('')
       const count = document.getElementById('owner-products-count')
       if (count) count.textContent = `${productRows.length}/${products.length}`
+      const lowStock = document.getElementById('owner-products-low-stock-count')
+      if (lowStock) lowStock.textContent = String(lowStockCount)
     }
     const suppliersList = document.getElementById('owner-suppliers-list')
     if (suppliersList) suppliersList.innerHTML = renderSuppliersList()
@@ -3761,6 +3946,9 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                       <option value="barna">Barna</option>
                       <option value="front">Front</option>
                     </select>
+                    <input id="owner-product-min-stock" type="number" min="0" step="1" placeholder="Min stock" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                    <input id="owner-product-reorder-point" type="number" min="0" step="1" placeholder="Reorder point" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                    <input id="owner-product-initial-stock" type="number" min="0" step="1" placeholder="Stok fillestar (opsional)" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none md:col-span-2" />
                     <input id="owner-product-aliases" type="text" placeholder="Emra alternativë (opsional), ndarë me presje" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none md:col-span-2" />
                     <datalist id="owner-supplier-options"></datalist>
                     <button type="submit" class="premium-btn-primary w-full rounded-lg px-3 py-1.5 text-xs font-semibold md:col-span-2">
@@ -3793,7 +3981,11 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                 </div>
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <h3 class="text-base font-semibold text-slate-900">Produkte ekzistuese</h3>
-                  <span class="text-[11px] text-slate-500">Shfaqur: <span id="owner-products-count">${products.length}</span></span>
+                  <div class="text-[11px] text-slate-500">
+                    Shfaqur: <span id="owner-products-count">${products.length}</span>
+                    <span class="mx-1.5">•</span>
+                    Nen prag: <span id="owner-products-low-stock-count">0</span>
+                  </div>
                 </div>
                 <div class="owner-products-filters mb-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
                   <label class="flex items-center gap-1.5 text-[11px] text-slate-600 whitespace-nowrap">
@@ -3811,6 +4003,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                     <option value="name">Rendit: Emri</option>
                     <option value="supplier">Rendit: Furnitori</option>
                     <option value="category">Rendit: Kategoria</option>
+                    <option value="stock">Rendit: Stoku</option>
                   </select>
                 </div>
                 <ul id="owner-products-list" class="max-h-56 overflow-auto pr-1"></ul>
@@ -4121,6 +4314,9 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
   const productNameInput = document.getElementById('owner-product-name') as HTMLInputElement | null
   const productSupplierInput = document.getElementById('owner-product-supplier') as HTMLInputElement | null
   const productCategoryInput = document.getElementById('owner-product-category') as HTMLSelectElement | null
+  const productMinStockInput = document.getElementById('owner-product-min-stock') as HTMLInputElement | null
+  const productReorderPointInput = document.getElementById('owner-product-reorder-point') as HTMLInputElement | null
+  const productInitialStockInput = document.getElementById('owner-product-initial-stock') as HTMLInputElement | null
   const productAliasesInput = document.getElementById('owner-product-aliases') as HTMLInputElement | null
   const supplierForm = document.getElementById('owner-supplier-form') as HTMLFormElement | null
   const supplierNameInput = document.getElementById('owner-supplier-name') as HTMLInputElement | null
@@ -4220,7 +4416,8 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
       return
     }
     if (t.id === 'owner-products-sort') {
-      productSortBy = t.value === 'supplier' || t.value === 'category' ? t.value : 'name'
+      productSortBy =
+        t.value === 'supplier' || t.value === 'category' || t.value === 'stock' ? t.value : 'name'
       refreshUI()
       return
     }
@@ -4247,17 +4444,37 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     const supplier = productSupplierInput?.value ?? ''
     const category = (productCategoryInput?.value === 'front' ? 'front' : 'barna')
     const aliases = parseAliasesInput(productAliasesInput?.value ?? '')
+    const minStock = Math.max(0, parseWholeNumberInput(productMinStockInput?.value ?? '0', 0))
+    const reorderPoint = Math.max(
+      0,
+      parseWholeNumberInput(productReorderPointInput?.value ?? String(minStock), minStock)
+    )
+    const initialStock = Math.max(0, parseWholeNumberInput(productInitialStockInput?.value ?? '0', 0))
 
-    const result = await addProduct({ name, supplier, category, aliases })
+    const result = await addProduct({ name, supplier, category, aliases, minStock, reorderPoint })
     if (!result.ok) {
       showToast(result.message)
       return
+    }
+    if (initialStock > 0 && result.productId && !result.existed) {
+      const stockResult = await adjustProductStock({
+        productId: result.productId,
+        quantityDelta: initialStock,
+        movementType: 'INITIAL_COUNT',
+        note: 'Stok fillestar',
+      })
+      if (!stockResult.ok) {
+        showToast(stockResult.message)
+      }
     }
     products = await getProducts()
     suppliers = await getSuppliers()
     preferredProductByName = await getPreferredProductByName()
     productForm.reset()
     if (productCategoryInput) productCategoryInput.value = 'barna'
+    if (productMinStockInput) productMinStockInput.value = ''
+    if (productReorderPointInput) productReorderPointInput.value = ''
+    if (productInitialStockInput) productInitialStockInput.value = ''
     refreshUI()
     showToast('Bari u shtua. Do të dalë edhe te punëtori.')
   })
@@ -5130,6 +5347,27 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
       return
     }
 
+    if (action === 'adjust-stock' && productId) {
+      const current = products.find((p) => p.id === productId)
+      if (!current) return
+      const movement = await openStockAdjustModal(current)
+      if (!movement) return
+      const result = await adjustProductStock({
+        productId: current.id,
+        quantityDelta: movement.quantityDelta,
+        note: movement.note,
+        movementType: movement.movementType,
+      })
+      if (!result.ok) {
+        showToast(result.message)
+        return
+      }
+      products = await getProducts()
+      refreshUI()
+      showToast('Stoku u perditesua.')
+      return
+    }
+
     if (action === 'edit-product' && productId) {
       const current = products.find((p) => p.id === productId)
       if (!current) return
@@ -5141,6 +5379,8 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
         supplier: edited.supplier,
         category: edited.category,
         aliases: edited.aliases,
+        minStock: edited.minStock,
+        reorderPoint: edited.reorderPoint,
       })
       if (!result.ok) {
         showToast(result.message)

@@ -1,6 +1,7 @@
 import { isSupabaseConfigured, supabase } from './supabase.js'
 import {
   addProduct as addProductMock,
+  adjustProductStock as adjustProductStockMock,
   deleteProduct as deleteProductMock,
   addShortage as addShortageMock,
   deleteShortage as deleteShortageMock,
@@ -59,7 +60,16 @@ export interface ProductView {
   minOrderQty?: number
   offerPriority?: number
   isActiveOffer?: boolean
+  currentStock: number
+  minStock: number
+  reorderPoint: number
 }
+
+export type StockMovementType =
+  | 'INITIAL_COUNT'
+  | 'ADJUSTMENT_IN'
+  | 'ADJUSTMENT_OUT'
+  | 'MANUAL_CORRECTION'
 
 export interface ShortageView {
   id: string
@@ -146,6 +156,12 @@ async function resolveProductsInput(
 
 function isUuidValue(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function toSafeInteger(value: unknown, fallback = 0): number {
+  const parsed = typeof value === 'number' ? value : value != null ? Number(value) : fallback
+  if (!Number.isFinite(parsed)) return Math.trunc(fallback)
+  return Math.trunc(parsed)
 }
 
 function shiftIsoDays(base: Date, offsetDays: number): string {
@@ -489,6 +505,9 @@ function fromMockProducts(rows: MockProduct[]): ProductView[] {
     minOrderQty: p.minOrderQty,
     offerPriority: p.offerPriority,
     isActiveOffer: p.isActiveOffer,
+    currentStock: toSafeInteger(p.currentStock, 0),
+    minStock: Math.max(0, toSafeInteger(p.minStock, 0)),
+    reorderPoint: Math.max(0, toSafeInteger(p.reorderPoint, p.minStock ?? 0)),
   }))
 }
 
@@ -497,15 +516,29 @@ export async function getProducts(): Promise<ProductView[]> {
   const companyId = await resolveCurrentCompanyId()
   if (!companyId) return []
 
-  const { data, error } = await supabase
-    .from('products')
-    .select('id,name,generic_name,default_order_qty,category,aliases,supplier_id,unit_price,lead_time_days,min_order_qty,offer_priority,is_active_offer,suppliers(name)')
-    .eq('company_id', companyId)
-    .order('name')
+  const [productsRes, stockRes] = await Promise.all([
+    supabase
+      .from('products')
+      .select(
+        'id,name,generic_name,default_order_qty,category,aliases,supplier_id,unit_price,lead_time_days,min_order_qty,offer_priority,is_active_offer,min_stock,reorder_point,suppliers(name)'
+      )
+      .eq('company_id', companyId)
+      .order('name'),
+    supabase.rpc('current_stock_by_product'),
+  ])
 
-  if (error || !data) return []
+  if (productsRes.error || !productsRes.data) return []
 
-  return data.map((row: any) => ({
+  const stockByProduct = new Map<string, number>()
+  if (!stockRes.error && Array.isArray(stockRes.data)) {
+    for (const row of stockRes.data as Array<{ product_id?: unknown; current_stock?: unknown }>) {
+      const productId = String(row.product_id ?? '').trim()
+      if (!productId) continue
+      stockByProduct.set(productId, toSafeInteger(row.current_stock, 0))
+    }
+  }
+
+  return productsRes.data.map((row: any) => ({
     id: row.id,
     name: row.name,
     genericName: row.generic_name ?? undefined,
@@ -534,6 +567,9 @@ export async function getProducts(): Promise<ProductView[]> {
           ? Number(row.offer_priority)
           : undefined,
     isActiveOffer: typeof row.is_active_offer === 'boolean' ? row.is_active_offer : undefined,
+    currentStock: toSafeInteger(stockByProduct.get(String(row.id ?? '').trim()), 0),
+    minStock: Math.max(0, toSafeInteger(row.min_stock, 0)),
+    reorderPoint: Math.max(0, toSafeInteger(row.reorder_point, row.min_stock ?? 0)),
   }))
 }
 
@@ -1282,21 +1318,34 @@ export async function addProduct(input: {
   lastPaidPrice?: number
   lastPriceDate?: string
   defaultOrderQty?: number
-}): Promise<{ ok: true } | { ok: false; message: string }> {
+  minStock?: number
+  reorderPoint?: number
+}): Promise<{ ok: true; productId?: string; existed?: boolean } | { ok: false; message: string }> {
   if (!isSupabaseConfigured) {
     const result = addProductMock({
       name: input.name,
       supplier: input.supplier,
       category: input.category,
       aliases: input.aliases,
+      minStock: input.minStock,
+      reorderPoint: input.reorderPoint,
     })
-    return result.ok ? { ok: true } : result
+    if (!result.ok) return result
+    const created =
+      result.products.find(
+        (row) =>
+          row.name.trim().toLocaleLowerCase('sq-AL') === input.name.trim().toLocaleLowerCase('sq-AL') &&
+          row.supplier.trim().toLocaleLowerCase('sq-AL') === input.supplier.trim().toLocaleLowerCase('sq-AL')
+      ) ?? null
+    return { ok: true, productId: created?.id }
   }
 
   const name = input.name.trim()
   const supplierName = input.supplier.trim()
   const producerName = (input.producerName ?? '').trim()
   const defaultOrderQty = Math.max(1, Number(input.defaultOrderQty ?? 1))
+  const minStock = Math.max(0, toSafeInteger(input.minStock, 0))
+  const reorderPoint = Math.max(0, toSafeInteger(input.reorderPoint, minStock))
   const lastPaidPrice =
     typeof input.lastPaidPrice === 'number' && Number.isFinite(input.lastPaidPrice)
       ? input.lastPaidPrice
@@ -1348,24 +1397,30 @@ export async function addProduct(input: {
     last_paid_price: lastPaidPrice,
     last_price_date: lastPriceDate,
     default_order_qty: defaultOrderQty,
+    min_stock: minStock,
+    reorder_point: reorderPoint,
     updated_at: new Date().toISOString(),
   }
 
   if (existingId) {
     const { error } = await supabase.from('products').update(payload).eq('id', existingId).eq('company_id', companyId)
     if (error) return { ok: false, message: error.message }
-    return { ok: true }
+    return { ok: true, productId: existingId, existed: true }
   }
 
-  const insertProduct = await supabase.from('products').insert({
-    name,
-    company_id: companyId,
-    supplier_id: supplierId,
-    ...payload,
-  })
+  const insertProduct = await supabase
+    .from('products')
+    .insert({
+      name,
+      company_id: companyId,
+      supplier_id: supplierId,
+      ...payload,
+    })
+    .select('id')
+    .single()
   if (insertProduct.error) return { ok: false, message: insertProduct.error.message }
 
-  return { ok: true }
+  return { ok: true, productId: String(insertProduct.data?.id ?? '').trim() || undefined, existed: false }
 }
 
 export async function updateProduct(input: {
@@ -1378,15 +1433,19 @@ export async function updateProduct(input: {
   lastPaidPrice?: number
   lastPriceDate?: string
   defaultOrderQty?: number
-}): Promise<{ ok: true } | { ok: false; message: string }> {
+  minStock?: number
+  reorderPoint?: number
+}): Promise<{ ok: true; productId?: string } | { ok: false; message: string }> {
   if (!isSupabaseConfigured) {
     const result = updateProductMock(input.id, {
       name: input.name,
       supplier: input.supplier,
       category: input.category,
       aliases: input.aliases,
+      minStock: input.minStock,
+      reorderPoint: input.reorderPoint,
     })
-    return result.ok ? { ok: true } : result
+    return result.ok ? { ok: true, productId: input.id } : result
   }
 
   const id = input.id.trim()
@@ -1394,6 +1453,8 @@ export async function updateProduct(input: {
   const supplierName = input.supplier.trim()
   const producerName = (input.producerName ?? '').trim()
   const defaultOrderQty = Math.max(1, Number(input.defaultOrderQty ?? 1))
+  const minStock = Math.max(0, toSafeInteger(input.minStock, 0))
+  const reorderPoint = Math.max(0, toSafeInteger(input.reorderPoint, minStock))
   const lastPaidPrice =
     typeof input.lastPaidPrice === 'number' && Number.isFinite(input.lastPaidPrice)
       ? input.lastPaidPrice
@@ -1455,13 +1516,58 @@ export async function updateProduct(input: {
       last_paid_price: lastPaidPrice,
       last_price_date: lastPriceDate,
       default_order_qty: defaultOrderQty,
+      min_stock: minStock,
+      reorder_point: reorderPoint,
       updated_at: new Date().toISOString(),
     })
     .eq('id', id)
     .eq('company_id', companyId)
 
   if (error) return { ok: false, message: error.message }
-  return { ok: true }
+  return { ok: true, productId: id }
+}
+
+export async function adjustProductStock(input: {
+  productId: string
+  quantityDelta: number
+  note?: string
+  movementType?: StockMovementType
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const productId = input.productId.trim()
+  const quantityDelta = toSafeInteger(input.quantityDelta, 0)
+  const note = String(input.note ?? '').trim()
+  const movementType = (input.movementType ?? 'MANUAL_CORRECTION') as StockMovementType
+
+  if (!productId) return { ok: false, message: 'Produkti mungon.' }
+  if (!Number.isFinite(quantityDelta) || quantityDelta === 0) {
+    return { ok: false, message: 'Levizja e stokut duhet te jete numer i plote dhe jo zero.' }
+  }
+
+  if (!isSupabaseConfigured) {
+    const result = adjustProductStockMock(productId, quantityDelta, note, movementType)
+    return result.ok ? { ok: true } : result
+  }
+
+  const rpc = await supabase.rpc('adjust_product_stock', {
+    p_product_id: productId,
+    p_quantity_delta: quantityDelta,
+    p_movement_type: movementType,
+    p_note: note || null,
+  })
+  if (!rpc.error) return { ok: true }
+
+  const msg = String(rpc.error.message ?? '')
+  const missingRpc =
+    String((rpc.error as { code?: unknown }).code ?? '').trim() === 'PGRST202' ||
+    /adjust_product_stock|could not find the function|function .* does not exist/i.test(msg)
+  if (missingRpc) {
+    return {
+      ok: false,
+      message:
+        "RPC adjust_product_stock nuk u gjet. Ekzekuto migrimin 20260417100000_inventory_stock_movements.sql dhe pastaj: notify pgrst, 'reload schema'.",
+    }
+  }
+  return { ok: false, message: msg || 'Levizja e stokut deshtoi.' }
 }
 
 export async function deleteProduct(id: string): Promise<{ ok: true } | { ok: false; message: string }> {
