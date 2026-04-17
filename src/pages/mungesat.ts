@@ -12,82 +12,83 @@ import { rankProductsForWorkerSearch } from '../lib/fuzzyProductSearch.js'
 const iconLogout = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>`
 const iconSearch = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 117.5-7.5 7.5 7.5 0 01-7.5 7.5z" /></svg>`
 const iconMenu = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>`
-const iconKpiTotal = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>`
-const iconKpiProducts = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10" /></svg>`
-const iconKpiUrgent = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4m0 4h.01" /></svg>`
 
 type WorkerSection = 'mungesat'
+
+function compareWorkerText(a: string, b: string): number {
+  return a.localeCompare(b, 'sq-AL', { sensitivity: 'base', numeric: true })
+}
 
 function renderResults(results: ProductView[]): string {
   if (!results.length) {
     return `<div class="premium-empty">
-      <div class="premium-empty-title">Nuk u gjet asnjë bar</div>
-      <p class="premium-empty-copy">Kontrollo drejtshkrimin ose provo me emër tjetër.</p>
+      <div class="premium-empty-title">Nuk u gjet asnje produkt</div>
+      <p class="premium-empty-copy">Kontrollo drejtshkrimin ose provo me nje emer alternativ.</p>
     </div>`
   }
 
   return `
-    <ul class="mt-2 overflow-hidden rounded-xl border border-slate-200 divide-y divide-slate-200 bg-white">
+    <div class="worker-results-list">
       ${results
         .map(
           (p) => `
-        <li>
-          <button type="button" class="w-full text-left px-3 py-2.5 hover:bg-slate-50 flex items-center justify-between gap-2 select-product transition-colors" data-id="${p.id}">
-            <div>
-              <div class="text-sm font-medium text-slate-800">${p.name}</div>
-            </div>
-            <span class="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full border border-slate-300 text-slate-600">
-              ${p.category === 'barna' ? 'Barna' : 'Front'}
-            </span>
-          </button>
-        </li>`
+        <button type="button" class="worker-result-card select-product" data-id="${p.id}">
+          <div class="worker-result-copy">
+            <div class="worker-result-title">${p.name}</div>
+            <div class="worker-result-subtitle">${p.supplierName || 'Pa furnitor te lidhur'}</div>
+          </div>
+          <div class="worker-result-meta">
+            <span class="worker-result-pill">${p.category === 'barna' ? 'Barna' : 'Front'}</span>
+            <span class="worker-result-action">Shto</span>
+          </div>
+        </button>`
         )
         .join('')}
-    </ul>
+    </div>
   `
 }
 
 function renderMissingList(missingItems: ShortageView[]): string {
   if (!missingItems.length) {
     return `<div class="premium-empty">
-      <div class="premium-empty-title">Nuk ka mungesa për sot</div>
-      <p class="premium-empty-copy">Gjendja është e stabilizuar për momentin.</p>
+      <div class="premium-empty-title">Nuk ka mungesa per sot</div>
+      <p class="premium-empty-copy">Gjendja eshte e stabilizuar per momentin. Kur te shtosh nje mungese, do ta shohesh menjehere ketu.</p>
     </div>`
   }
 
+  const orderedItems = [...missingItems].sort((a, b) => {
+    const urgentDiff = Number(b.urgent) - Number(a.urgent)
+    if (urgentDiff !== 0) return urgentDiff
+    return compareWorkerText(String(a.productName ?? ''), String(b.productName ?? ''))
+  })
+
   return `
-    <div class="worker-missing-table-wrap overflow-hidden rounded-xl border border-slate-200 bg-white">
-      <table class="min-w-full text-xs">
-        <thead class="worker-missing-head ui-table-head bg-slate-100 text-slate-700">
-          <tr>
-            <th class="px-3 py-2 text-left font-medium">Bari</th>
-            <th class="px-3 py-2 text-left font-medium">Urgjent</th>
-            <th class="px-3 py-2 text-left font-medium">Shënim</th>
-            <th class="px-3 py-2 text-right font-medium">Shtuar</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${missingItems
-            .map(
-              (m) => `
-            <tr class="worker-missing-row border-t border-slate-200 hover:bg-slate-50/70 transition-colors">
-              <td data-label="Bari" class="worker-missing-product px-3 py-2.5 font-medium text-slate-800">${m.productName}</td>
-              <td data-label="Urgjent" class="px-3 py-2.5">
-                ${
-                  m.urgent
-                    ? '<span class="worker-missing-status worker-missing-status-urgent inline-flex rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700 border border-red-200">URGJENT</span>'
-                    : '<span class="worker-missing-status worker-missing-status-normal inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600 border border-slate-200">Normal</span>'
-                }
-              </td>
-              <td data-label="Shënim" class="worker-missing-note px-3 py-2.5 text-slate-600">${m.note || '—'}</td>
-              <td data-label="Shtuar" class="px-3 py-2.5 text-right">
-                <span class="worker-missing-count inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700 border border-slate-200">x${m.addedCount}</span>
-              </td>
-            </tr>`
-            )
-            .join('')}
-        </tbody>
-      </table>
+    <div class="worker-missing-stack">
+      ${orderedItems
+        .map(
+          (item) => `
+        <article class="worker-missing-card">
+          <div class="worker-missing-card-main">
+            <div class="worker-missing-card-top">
+              <div>
+                <h3 class="worker-missing-product">${item.productName}</h3>
+                <p class="worker-missing-supplier">${item.supplierName || 'Pa furnitor te caktuar'}</p>
+              </div>
+              ${
+                item.urgent
+                  ? '<span class="worker-missing-status worker-missing-status-urgent">Urgjent</span>'
+                  : '<span class="worker-missing-status worker-missing-status-normal">Normal</span>'
+              }
+            </div>
+            <p class="worker-missing-note ${item.note ? '' : 'worker-missing-note-muted'}">${item.note || 'Pa shenim shtese.'}</p>
+          </div>
+          <div class="worker-missing-meta">
+            <span class="worker-missing-pill">x${item.addedCount}</span>
+            <span class="worker-missing-chip">Sot</span>
+          </div>
+        </article>`
+        )
+        .join('')}
     </div>
   `
 }
@@ -122,7 +123,7 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
               </div>
               <span class="text-sm font-semibold text-slate-900">SmartManage</span>
             </div>
-            <button type="button" id="worker-nav-toggle" class="premium-nav-toggle worker-nav-toggle-btn shrink-0" aria-label="Hap menynë" aria-expanded="true">
+            <button type="button" id="worker-nav-toggle" class="premium-nav-toggle worker-nav-toggle-btn shrink-0" aria-label="Hap menune" aria-expanded="true">
               ${iconMenu}
             </button>
           </div>
@@ -133,7 +134,7 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
         <div class="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2.5">
           <div id="worker-account-initial" class="flex h-9 w-9 items-center justify-center rounded-full bg-blue-50 text-sm font-semibold text-blue-700">P</div>
           <div class="text-xs">
-            <div id="worker-account-name" class="text-slate-900 font-medium">Përdorues</div>
+            <div id="worker-account-name" class="text-slate-900 font-medium">Perdorues</div>
             <div id="worker-account-role" class="text-slate-500 text-[11px]">Llogari</div>
           </div>
         </div>
@@ -143,19 +144,20 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
         type="button"
         id="worker-logo-reopen"
         class="worker-logo-reopen hidden"
-        aria-label="Hap menynë"
-        title="Hap menynë"
+        aria-label="Hap menune"
+        title="Hap menune"
       >
         <img src="/brand/smartmanage/logo.png" alt="SmartManage" class="h-6 w-6 rounded-full object-cover" />
       </button>
 
       <main class="premium-main worker-main px-4 py-4 md:px-6 md:py-5">
-        <header class="premium-header mb-5 border-b border-slate-200 pb-4">
-          <div class="worker-header-layout flex flex-wrap items-center justify-between gap-3">
+        <header class="premium-header worker-page-header mb-5">
+          <div class="worker-header-layout flex flex-wrap items-start justify-between gap-3">
             <div class="worker-header-title flex min-w-0 items-center gap-3">
               <div class="min-w-0">
-                <p class="text-xs uppercase tracking-wide text-slate-500">Mungesat</p>
-                <h1 class="text-xl md:text-2xl font-semibold tracking-tight text-slate-900">Shto mungesa shpejt</h1>
+                <p class="text-xs uppercase tracking-wide text-slate-500">Paneli i dites</p>
+                <h1 class="text-xl md:text-2xl font-semibold tracking-tight text-slate-900">Regjistro mungesat pa humbur ritmin</h1>
+                <p class="mt-1 text-sm text-slate-600">Kerkimi, urgjenca dhe lista e sotme jane ne nje rrjedhe te vetme, me fokus te qarte te veprimi.</p>
               </div>
             </div>
             <div class="worker-header-actions flex items-center gap-2">
@@ -168,44 +170,84 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
           </div>
         </header>
 
-        <section class="${section === 'mungesat' ? '' : 'hidden '}premium-card mb-4 p-5">
-          <div class="worker-kpi-row mb-3 flex flex-wrap items-center gap-2 text-[11px]">
-            <span class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-slate-700">
-              ${iconKpiTotal}
-              Totali: <strong id="worker-stat-total" class="font-semibold text-slate-900">0</strong>
-            </span>
-            <span class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-slate-700">
-              ${iconKpiProducts}
-              Produkte: <strong id="worker-stat-products" class="font-semibold text-slate-900">0</strong>
-            </span>
-            <span class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-slate-700">
-              ${iconKpiUrgent}
-              Urgjente: <strong id="worker-stat-urgent" class="font-semibold text-slate-900">0</strong>
-            </span>
+        <section class="premium-hero worker-stage mb-4">
+          <div>
+            <p class="premium-hero-kicker">Rrjedha e ekipit</p>
+            <h2 class="premium-hero-title">Nga kerkimi te shtimi me nje klik</h2>
+            <p class="premium-hero-copy">Kliko nga sugjerimet per shtim te menjehershem. Nese del vetem nje rezultat, mund te shtosh edhe me Enter.</p>
           </div>
-          <div class="space-y-3">
-            <div>
-              <label for="search-bar" class="sr-only">Kërko barin</label>
-              <div class="premium-top-search">
-                <span class="premium-top-search-icon">${iconSearch}</span>
-                <input id="search-bar" type="text" autocomplete="off" placeholder="Kërko barin…" class="premium-top-search-input" aria-label="Kërko barin" />
+          <div class="premium-hero-chips">
+            <span class="premium-chip">Sugjerime live</span>
+            <span class="premium-chip">Urgjente ne fokus</span>
+            <span class="premium-chip">Te dhena per kompani</span>
+          </div>
+        </section>
+
+        <section class="${section === 'mungesat' ? '' : 'hidden '}premium-card worker-composer-card mb-4 p-5">
+          <div class="worker-composer-grid">
+            <div class="worker-composer-main">
+              <div class="worker-section-heading">
+                <span class="worker-section-eyebrow">Hapi 1</span>
+                <h2 class="worker-section-title">Kerko dhe shto produktin</h2>
+                <p class="worker-section-copy">Shkruaj emrin e produktit, vendos nese eshte urgjent dhe zgjidhe direkt nga rezultatet me poshte.</p>
+              </div>
+
+              <div class="space-y-3">
+                <div>
+                  <label for="search-bar" class="sr-only">Kerko produktin</label>
+                  <div class="premium-top-search worker-top-search">
+                    <span class="premium-top-search-icon">${iconSearch}</span>
+                    <input id="search-bar" type="text" autocomplete="off" placeholder="Kerko barin ose emrin alternativ..." class="premium-top-search-input" aria-label="Kerko produktin" />
+                  </div>
+                </div>
+
+                <div class="worker-entry-controls worker-entry-strip">
+                  <label class="worker-urgent-toggle">
+                    <input id="urgent-toggle" type="checkbox" class="h-4 w-4 rounded border-slate-300 bg-white text-red-500 focus:ring-blue-500" />
+                    <span>Urgjent</span>
+                  </label>
+                  <input id="note-input" type="text" placeholder="Shto nje shenim te shkurter (opsionale)" class="premium-input worker-note-input" aria-label="Shenim opsional" />
+                </div>
+
+                <p class="worker-inline-hint">Sugjerimet shfaqen menjehere. Kliko kartelen e produktit per ta shtuar ne listen e sotme.</p>
+                <div id="search-results"></div>
               </div>
             </div>
-            <div class="worker-entry-controls flex flex-col sm:flex-row sm:items-center gap-2 text-sm text-slate-700">
-              <label class="inline-flex items-center gap-2">
-                <input id="urgent-toggle" type="checkbox" class="h-4 w-4 rounded border-slate-300 bg-white text-red-500 focus:ring-blue-500" />
-                URGJENT
-              </label>
-              <input id="note-input" type="text" placeholder="Shënim (opsional)" class="premium-input flex-1 rounded-lg px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none" aria-label="Shënim opsional" />
-            </div>
-            <div id="search-results" class="mt-2"></div>
+
+            <aside class="worker-summary-panel">
+              <span class="worker-section-eyebrow">Pamja e dites</span>
+              <div class="worker-stat-grid">
+                <article class="worker-stat-card">
+                  <span class="worker-stat-label">Mungesa sot</span>
+                  <strong id="worker-stat-total" class="worker-stat-value">0</strong>
+                  <p class="worker-stat-copy">Mungesat e shtuara nga llogaria jote sot.</p>
+                </article>
+                <article class="worker-stat-card">
+                  <span class="worker-stat-label">Katalogu</span>
+                  <strong id="worker-stat-products" class="worker-stat-value">0</strong>
+                  <p class="worker-stat-copy">Produkte te disponueshme per kerkimin e shpejte.</p>
+                </article>
+                <article class="worker-stat-card worker-stat-card-alert">
+                  <span class="worker-stat-label">Urgjente</span>
+                  <strong id="worker-stat-urgent" class="worker-stat-value">0</strong>
+                  <p class="worker-stat-copy">Raste qe duhen trajtuar me perparesi ne panel.</p>
+                </article>
+              </div>
+              <div class="worker-summary-tip">
+                Pas shtimit, lista e sotme rifreskohet automatikisht dhe urgjentet dalin lart per t'u pare me shpejt.
+              </div>
+            </aside>
           </div>
         </section>
 
         <section class="${section === 'mungesat' ? '' : 'hidden '}premium-card p-5">
-          <div class="flex items-center justify-between mb-2">
-            <h2 class="text-base font-semibold text-slate-900">Lista e mungesave për sot</h2>
-            <span class="text-xs text-slate-500">${new Date().toLocaleDateString('sq-AL')}</span>
+          <div class="worker-list-head">
+            <div>
+              <span class="worker-section-eyebrow">Hapi 2</span>
+              <h2 class="text-base font-semibold text-slate-900">Lista e mungesave per sot</h2>
+              <p class="mt-1 text-sm text-slate-600">Urgjentet shfaqen lart, qe te mos humbin ne liste.</p>
+            </div>
+            <span class="worker-list-date">${new Date().toLocaleDateString('sq-AL')}</span>
           </div>
           <div id="missing-list">
             ${renderMissingList([])}
@@ -250,13 +292,14 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
     navToggle?.setAttribute('aria-expanded', open ? 'true' : 'false')
     syncNavReopenVisibility()
   }
+
   const closeSidebarOnMobile = (): void => {
     if (!window.matchMedia('(min-width: 768px)').matches) {
       setSidebarOpen(false)
     }
   }
-  const sidebarNavLinks = Array.from(sidebar?.querySelectorAll<HTMLAnchorElement>('a[href^="#/"]') ?? [])
 
+  const sidebarNavLinks = Array.from(sidebar?.querySelectorAll<HTMLAnchorElement>('a[href^="#/"]') ?? [])
   sidebarNavLinks.forEach((link) => {
     link.addEventListener('click', closeSidebarOnMobile)
   })
@@ -282,7 +325,6 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
   syncNavReopenVisibility()
 
   const searchInput = document.getElementById('search-bar') as HTMLInputElement
-  const topSearchInput = document.getElementById('search-bar-top') as HTMLInputElement | null
   const urgentToggle = document.getElementById('urgent-toggle') as HTMLInputElement
   const noteInput = document.getElementById('note-input') as HTMLInputElement
   const resultsDiv = document.getElementById('search-results') as HTMLDivElement
@@ -305,7 +347,7 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
 
   async function loadAccountInfo(): Promise<void> {
     if (!isSupabaseConfigured) {
-      applyAccountInfo('Përdorues', 'Demo')
+      applyAccountInfo('Perdorues', 'Demo')
       return
     }
 
@@ -320,21 +362,17 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
       const usernameMeta = String(user?.user_metadata?.username ?? '').trim()
       let profileUsername = ''
       if (user?.id) {
-        const profileRes = await supabase
-          .from('profiles')
-          .select('username')
-          .eq('id', user.id)
-          .maybeSingle()
+        const profileRes = await supabase.from('profiles').select('username').eq('id', user.id).maybeSingle()
         if (!profileRes.error && profileRes.data) {
           profileUsername = String((profileRes.data as { username?: unknown }).username ?? '').trim()
         }
       }
       const usernameFromEmail = email.includes('@') ? email.split('@')[0]?.trim() ?? '' : ''
       const visibleUsername = profileUsername || usernameMeta || usernameFromEmail
-      const roleLabel = profile?.role === 'OWNER' ? 'Pronari' : 'Punëtor'
+      const roleLabel = profile?.role === 'OWNER' ? 'Pronari' : 'Puntori'
       applyAccountInfo(visibleUsername || fullName || roleLabel, roleLabel)
     } catch {
-      applyAccountInfo('Përdorues', 'Llogari')
+      applyAccountInfo('Perdorues', 'Llogari')
     }
   }
 
@@ -354,7 +392,7 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
     }
     missingListDiv.innerHTML = renderMissingList(visibleItems)
     if (statTotal) statTotal.textContent = String(visibleItems.length)
-    if (statUrgent) statUrgent.textContent = String(visibleItems.filter((x) => x.urgent).length)
+    if (statUrgent) statUrgent.textContent = String(visibleItems.filter((row) => row.urgent).length)
   }
 
   async function addSelectedProduct(productId: string): Promise<void> {
@@ -364,12 +402,11 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
     try {
       await addMungese(productId, incomingUrgent, incomingNote)
     } catch {
-      showToast('Shtimi dështoi.')
+      showToast('Shtimi deshtoi.')
       return
     }
 
     searchInput.value = ''
-    if (topSearchInput) topSearchInput.value = ''
     urgentToggle.checked = false
     noteInput.value = ''
     currentMatches = []
@@ -379,14 +416,14 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
   }
 
   function updateResults(): void {
-    const q = searchInput.value.trim()
-    if (!q) {
+    const query = searchInput.value.trim()
+    if (!query) {
       currentMatches = []
       resultsDiv.innerHTML = ''
       return
     }
 
-    currentMatches = rankProductsForWorkerSearch(allProducts, q, 8)
+    currentMatches = rankProductsForWorkerSearch(allProducts, query, 8)
     resultsDiv.innerHTML = renderResults(currentMatches)
 
     const buttons = resultsDiv.querySelectorAll<HTMLButtonElement>('button.select-product')
@@ -399,12 +436,6 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
     })
   }
 
-  const applySearch = (value: string): void => {
-    searchInput.value = value
-    if (topSearchInput) topSearchInput.value = value
-    updateResults()
-  }
-
   const handleSearchEnter = (event: KeyboardEvent): void => {
     if (event.key !== 'Enter') return
     if (currentMatches.length === 1) {
@@ -414,14 +445,12 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
     }
     if (currentMatches.length > 1) {
       event.preventDefault()
-      showToast('Ka disa rezultate. Zgjidh njërin nga sugjerimet.')
+      showToast('Ka disa rezultate. Zgjidh njerin nga sugjerimet.')
     }
   }
 
-  searchInput.addEventListener('input', () => applySearch(searchInput.value))
+  searchInput.addEventListener('input', updateResults)
   searchInput.addEventListener('keydown', handleSearchEnter)
-  topSearchInput?.addEventListener('input', () => applySearch(topSearchInput.value))
-  topSearchInput?.addEventListener('keydown', handleSearchEnter)
 
   getProducts().then((products) => {
     allProducts = products
