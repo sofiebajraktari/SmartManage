@@ -7,7 +7,13 @@ import {
   type ProductView,
   type ShortageView,
 } from '../lib/data.js'
-import { rankProductsForWorkerSearch } from '../lib/fuzzyProductSearch.js'
+import {
+  classifyUrgencyFromText,
+  interpretShortageNaturalLanguage,
+  type NaturalLanguageShortageInterpretation,
+  type TextUrgencyPrediction,
+} from '../lib/documentAi.js'
+import { rankProductsForWorkerSearch, workerProductSearchScore } from '../lib/fuzzyProductSearch.js'
 
 const iconLogout = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>`
 const iconSearch = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 117.5-7.5 7.5 7.5 0 01-7.5 7.5z" /></svg>`
@@ -17,6 +23,65 @@ const iconKpiProducts = `<svg class="h-4 w-4" fill="none" stroke="currentColor" 
 const iconKpiUrgent = `<svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0zM12 9v4m0 4h.01" /></svg>`
 
 type WorkerSection = 'mungesat'
+
+function renderUrgencyPrediction(prediction: TextUrgencyPrediction | null, sourceLabel: string): string {
+  if (!prediction) return ''
+  const toneClass =
+    prediction.level === 'HIGH'
+      ? 'border-red-200 bg-red-50 text-red-700'
+      : prediction.level === 'MEDIUM'
+        ? 'border-amber-200 bg-amber-50 text-amber-700'
+        : 'border-slate-200 bg-slate-50 text-slate-600'
+  const reasons = prediction.reasons.length ? prediction.reasons.join(', ') : 'pa sinjale te forta'
+  return `
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold ${toneClass}">
+        AI ${sourceLabel}: ${prediction.level === 'HIGH' ? 'urgjente' : prediction.level === 'MEDIUM' ? 'me prioritet' : 'jo urgjente'}
+      </span>
+      <span class="text-[10px] text-slate-500">Score ${prediction.score}% • ${reasons}</span>
+    </div>
+  `
+}
+
+function renderAiCommandFeedback(input: {
+  interpretation: NaturalLanguageShortageInterpretation
+  match: ProductView | null
+  matchScore: number | null
+}): string {
+  const matchConfidence =
+    input.matchScore == null
+      ? null
+      : input.matchScore <= 3
+        ? { label: 'shume e forte', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' }
+        : input.matchScore <= 12
+          ? { label: 'e mire', className: 'border-sky-200 bg-sky-50 text-sky-700' }
+          : { label: 'e kufizuar', className: 'border-amber-200 bg-amber-50 text-amber-700' }
+
+  return `
+    <div class="space-y-2 rounded-xl border border-sky-100 bg-white/80 p-2.5">
+      <div class="flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+        <span class="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-700">Produkt: ${input.interpretation.searchHint || '—'}</span>
+        <span class="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 font-semibold text-slate-700">Sasi: ${input.interpretation.quantity}</span>
+        ${
+          input.matchConfidence
+            ? `<span class="rounded-full border px-2 py-0.5 font-semibold ${input.matchConfidence.className}">Match ${input.matchConfidence.label}</span>`
+            : ''
+        }
+      </div>
+      ${renderUrgencyPrediction(input.interpretation.urgency, 'parse')}
+      ${
+        input.match
+          ? `<p class="text-[11px] text-slate-700">AI sugjeron produktin <strong>${input.match.name}</strong>.</p>`
+          : '<p class="text-[11px] text-slate-500">AI nuk gjeti produkt te sigurt ende; kontrollo sugjerimet poshte.</p>'
+      }
+      ${
+        input.interpretation.noteText
+          ? `<p class="text-[11px] text-slate-500">Shenim i nxjerre: ${input.interpretation.noteText}</p>`
+          : '<p class="text-[11px] text-slate-500">Pa shenim shtese te nxjerre nga teksti.</p>'
+      }
+    </div>
+  `
+}
 
 function renderResults(results: ProductView[]): string {
   if (!results.length) {
@@ -191,6 +256,20 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
                 <input id="search-bar" type="text" autocomplete="off" placeholder="Kërko barin…" class="premium-top-search-input" aria-label="Kërko barin" />
               </div>
             </div>
+            <div class="rounded-xl border border-sky-200 bg-sky-50/80 p-3">
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <p class="text-xs font-semibold uppercase tracking-wide text-sky-800">AI Quick Entry</p>
+                  <p class="text-[11px] text-sky-700">Shkruaj tekst natyral si: "Paracetamol urgent per temperature, 2 cope".</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button type="button" id="worker-ai-interpret" class="rounded-lg border border-sky-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100">AI interpreto</button>
+                  <button type="button" id="worker-ai-add" class="premium-btn-primary rounded-lg px-2.5 py-1.5 text-[11px] font-semibold">Shto me AI</button>
+                </div>
+              </div>
+              <input id="worker-ai-command" type="text" autocomplete="off" placeholder="p.sh. Brufen urgent per pacient, 3 cope" class="premium-input mt-2 w-full rounded-lg px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none" aria-label="AI quick entry" />
+              <div id="worker-ai-feedback" class="mt-2 text-[11px] text-slate-600"></div>
+            </div>
             <div class="worker-entry-controls flex flex-col sm:flex-row sm:items-center gap-2 text-sm text-slate-700">
               <label class="inline-flex items-center gap-2">
                 <input id="urgent-toggle" type="checkbox" class="h-4 w-4 rounded border-slate-300 bg-white text-red-500 focus:ring-blue-500" />
@@ -198,6 +277,7 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
               </label>
               <input id="note-input" type="text" placeholder="Shënim (opsional)" class="premium-input flex-1 rounded-lg px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none" aria-label="Shënim opsional" />
             </div>
+            <div id="worker-note-ai" class="text-[11px] text-slate-500"></div>
             <div id="search-results" class="mt-2"></div>
           </div>
         </section>
