@@ -51,7 +51,7 @@ async function renderWorkerPage(container: HTMLElement): Promise<void> {
 
 async function renderOwnerPage(
   container: HTMLElement,
-  section: 'dashboard' | 'mungesat' | 'porosite' | 'import' | 'settings' | 'profile' | 'kompania' | 'ekipa',
+  section: 'dashboard' | 'produktet' | 'mungesat' | 'porosite' | 'import' | 'settings' | 'profile' | 'kompania' | 'ekipa',
   role: 'OWNER' | 'MANAGER' | 'WORKER'
 ): Promise<void> {
   ownerPageModulePromise ??= import('./pages/pronari.js')
@@ -86,8 +86,9 @@ function getRoute(): string {
   return hash.startsWith('/') ? hash : '/' + hash
 }
 
-function getOwnerSection(route: string): 'dashboard' | 'mungesat' | 'porosite' | 'import' | 'settings' | 'profile' | 'kompania' | 'ekipa' {
+function getOwnerSection(route: string): 'dashboard' | 'produktet' | 'mungesat' | 'porosite' | 'import' | 'settings' | 'profile' | 'kompania' | 'ekipa' {
   if (route === '/pronari' || route === '/dashboard' || route.startsWith('/pronari/dashboard')) return 'dashboard'
+  if (route === '/produktet' || route.startsWith('/pronari/produktet')) return 'produktet'
   if (route === '/mungesat-pronari' || route.startsWith('/pronari/mungesat')) return 'mungesat'
   if (route === '/porosite' || route.startsWith('/pronari/porosite')) return 'porosite'
   if (route === '/import' || route.startsWith('/pronari/import')) return 'import'
@@ -175,6 +176,7 @@ async function render(): Promise<void> {
   if (
     route === '/pronari' ||
     route.startsWith('/pronari/') ||
+    route === '/produktet' ||
     route === '/porosite' ||
     route === '/import' ||
     route === '/settings' ||
@@ -188,7 +190,7 @@ async function render(): Promise<void> {
       return
     }
     const section = getOwnerSection(route)
-    if ((section === 'settings' || section === 'kompania' || section === 'import' || section === 'ekipa') && role !== 'OWNER') {
+    if ((section === 'produktet' || section === 'settings' || section === 'kompania' || section === 'import' || section === 'ekipa') && role !== 'OWNER') {
       window.location.hash = '#/pronari'
       return
     }

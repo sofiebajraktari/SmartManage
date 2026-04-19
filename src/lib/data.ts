@@ -117,6 +117,39 @@ export interface CompanyDetails {
   otherInfo: string
 }
 
+export interface AiStockEarlyWarning {
+  productId: string
+  name: string
+  supplierName: string
+  currentStock: number
+  reorderPoint: number
+  minStock: number
+  forecastPerDay: number
+  forecastNext7Days: number
+  daysLeft: number | null
+  leadTimeDays: number
+  recommendedQty: number
+  riskLevel: AiRiskLevel
+  reason: string
+  action: string
+}
+
+export interface AiDeadStockAlert {
+  productId: string
+  name: string
+  supplierName: string
+  currentStock: number
+  reorderPoint: number
+  minStock: number
+  forecastPerDay: number
+  daysSinceLastSignal: number | null
+  stockCoverageDays: number | null
+  label: 'OVERSTOCK' | 'DEAD_STOCK'
+  riskLevel: AiRiskLevel
+  reason: string
+  action: string
+}
+
 export interface DashboardInsights {
   shortageTrend: Array<{ date: string; count: number }>
   topSuppliers: Array<{ name: string; count: number }>
@@ -124,6 +157,8 @@ export interface DashboardInsights {
   urgentBreakdown: { urgent: number; normal: number }
   weekdayTrend: Array<{ day: string; count: number }>
   ai: AiOverview
+  stockWarnings: AiStockEarlyWarning[]
+  deadStockAlerts: AiDeadStockAlert[]
 }
 
 const COMPANY_ID_CACHE_TTL_MS = 60_000
@@ -340,6 +375,213 @@ function roundMoney(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+function roundOne(value: number): number {
+  return Math.round(value * 10) / 10
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function sum(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0)
+}
+
+function toRiskLevel(score: number): AiRiskLevel {
+  if (score >= 70) return 'HIGH'
+  if (score >= 45) return 'MEDIUM'
+  return 'LOW'
+}
+
+function riskRank(level: AiRiskLevel): number {
+  if (level === 'HIGH') return 3
+  if (level === 'MEDIUM') return 2
+  return 1
+}
+
+function buildEmptySeries(length: number): number[] {
+  return Array.from({ length: Math.max(1, length) }, () => 0)
+}
+
+function daysSinceLastPositiveSignal(series: number[]): number | null {
+  for (let idx = series.length - 1; idx >= 0; idx -= 1) {
+    if (Number(series[idx] ?? 0) > 0) {
+      return series.length - 1 - idx
+    }
+  }
+  return null
+}
+
+function buildStockSignals(input: {
+  products: ProductView[]
+  analysisRange: string[]
+  seriesByProduct: Map<string, number[]>
+  urgentRecentByProduct: Map<string, number>
+}): Pick<DashboardInsights, 'stockWarnings' | 'deadStockAlerts'> {
+  const stockWarnings: AiStockEarlyWarning[] = []
+  const deadStockAlerts: AiDeadStockAlert[] = []
+
+  input.products.forEach((product) => {
+    const dailySeries = input.seriesByProduct.get(product.id) ?? buildEmptySeries(input.analysisRange.length)
+    const currentStock = Math.max(0, Number(product.currentStock ?? 0))
+    const reorderPoint = Math.max(0, Number(product.reorderPoint ?? 0))
+    const minStock = Math.max(0, Number(product.minStock ?? 0))
+    const stockThreshold = Math.max(reorderPoint, minStock)
+    const leadTimeDays = Math.max(1, Math.round(Number(product.leadTimeDays ?? 2)))
+    const urgentNow = (input.urgentRecentByProduct.get(product.id) ?? 0) > 0
+    const forecast = forecastProductDemand({
+      productId: product.id,
+      name: product.name,
+      supplierName: product.supplierName,
+      dailySeries,
+      defaultOrderQty: product.defaultOrderQty ?? 1,
+      addedCount: dailySeries[dailySeries.length - 1] ?? 0,
+      urgentNow,
+    })
+    const forecastPerDay = Math.max(0, Number(forecast.forecastPerDay ?? 0))
+    const derivedDemandPerDay =
+      forecastPerDay > 0 ? forecastPerDay : currentStock <= stockThreshold && currentStock > 0 ? 0.25 : 0
+    const daysLeft =
+      currentStock <= 0
+        ? 0
+        : derivedDemandPerDay > 0
+          ? roundOne(currentStock / Math.max(derivedDemandPerDay, 0.1))
+          : null
+    const reorderPlan = optimizeReorderPlan({
+      productName: product.name,
+      supplierName: product.supplierName,
+      suggestedQty: forecast.recommendedQty,
+      forecastPerDay: Math.max(0.2, forecastPerDay || (stockThreshold > 0 ? stockThreshold / 14 : 0.2)),
+      forecastNext7Days: Math.max(forecast.forecastNext7Days, Math.round(Math.max(0.2, forecastPerDay) * 7)),
+      aiRiskScore: forecast.riskScore,
+      aiRiskLevel: forecast.riskLevel,
+      urgentNow,
+      unitPrice: product.unitPrice,
+      leadTimeDays: product.leadTimeDays,
+      minOrderQty: product.minOrderQty,
+    })
+    const shortageSoon = daysLeft != null && daysLeft <= leadTimeDays + 2
+    const warningScore = clamp(
+      Math.round(
+        forecast.riskScore * 0.45 +
+          (currentStock <= 0 ? 42 : 0) +
+          (stockThreshold > 0 && currentStock <= stockThreshold ? 24 : 0) +
+          (shortageSoon ? 18 : daysLeft != null && daysLeft <= 7 ? 10 : 0) +
+          (urgentNow ? 10 : 0)
+      ),
+      0,
+      99
+    )
+    const warningRiskLevel = toRiskLevel(warningScore)
+    const needsEarlyWarning =
+      currentStock <= 0 ||
+      (stockThreshold > 0 && currentStock <= stockThreshold) ||
+      (daysLeft != null && daysLeft <= 10)
+
+    if (needsEarlyWarning) {
+      const reasonParts: string[] = []
+      if (currentStock <= 0) reasonParts.push('stok zero')
+      else if (stockThreshold > 0 && currentStock <= stockThreshold) reasonParts.push('stok nen pragun e ri-porosise')
+      if (daysLeft != null && daysLeft > 0) reasonParts.push(`stok per rreth ${daysLeft} dite`)
+      if (urgentNow) reasonParts.push('sinjale urgjente ne 7 ditet e fundit')
+      else if (forecastPerDay >= 1) reasonParts.push('kerkese e qendrueshme')
+      if (!reasonParts.length) reasonParts.push('monitorim preventiv i stokut')
+
+      const action =
+        currentStock <= 0
+          ? `Rimbush stokun sot; AI sugjeron rreth ${reorderPlan.optimizedQty} njesi.`
+          : shortageSoon
+            ? `Porosite brenda 24 oresh; AI sugjeron ${reorderPlan.optimizedQty} njesi.`
+            : `Vendose ne watchlist dhe planifiko ${reorderPlan.optimizedQty} njesi.`
+
+      stockWarnings.push({
+        productId: product.id,
+        name: product.name,
+        supplierName: product.supplierName,
+        currentStock,
+        reorderPoint,
+        minStock,
+        forecastPerDay: forecast.forecastPerDay,
+        forecastNext7Days: forecast.forecastNext7Days,
+        daysLeft,
+        leadTimeDays,
+        recommendedQty: reorderPlan.optimizedQty,
+        riskLevel: warningRiskLevel,
+        reason: reasonParts.join(', '),
+        action,
+      })
+    }
+
+    if (currentStock <= 0) return
+
+    const totalSignals = sum(dailySeries)
+    const daysSinceLastSignal = daysSinceLastPositiveSignal(dailySeries)
+    const stockCoverageDays =
+      forecastPerDay > 0 ? roundOne(currentStock / Math.max(forecastPerDay, 0.1)) : null
+    const deadStock =
+      currentStock >= Math.max(4, stockThreshold > 0 ? stockThreshold * 2 : 4) && totalSignals === 0
+    const overstock =
+      currentStock >= Math.max(6, stockThreshold > 0 ? stockThreshold * 2 : 6) &&
+      (
+        (stockCoverageDays != null && stockCoverageDays >= 45) ||
+        (forecastPerDay < 0.25 && (daysSinceLastSignal == null || daysSinceLastSignal >= 21))
+      )
+
+    if (!deadStock && !overstock) return
+
+    const label: AiDeadStockAlert['label'] = deadStock ? 'DEAD_STOCK' : 'OVERSTOCK'
+    const deadStockRiskLevel: AiRiskLevel =
+      deadStock || (stockCoverageDays != null && stockCoverageDays >= 60) ? 'HIGH' : 'MEDIUM'
+    const reason =
+      label === 'DEAD_STOCK'
+        ? `Pa sinjale mungese ne ${input.analysisRange.length} dite; stok aktual ${currentStock}.`
+        : stockCoverageDays != null
+          ? `Stoku aktual mbulon rreth ${stockCoverageDays} dite me ritmin aktual.`
+          : 'Stok i larte krahasuar me sinjalet e fundit te mungesave.'
+    const action =
+      label === 'DEAD_STOCK'
+        ? 'Ngri porosite e reja dhe rishiko transferim, promovim ose ulje te reorder point.'
+        : 'Ule sasine e ri-porosise dhe rishiko min stock / reorder point.'
+
+    deadStockAlerts.push({
+      productId: product.id,
+      name: product.name,
+      supplierName: product.supplierName,
+      currentStock,
+      reorderPoint,
+      minStock,
+      forecastPerDay: forecast.forecastPerDay,
+      daysSinceLastSignal,
+      stockCoverageDays,
+      label,
+      riskLevel: deadStockRiskLevel,
+      reason,
+      action,
+    })
+  })
+
+  stockWarnings.sort((a, b) => {
+    const riskDiff = riskRank(b.riskLevel) - riskRank(a.riskLevel)
+    if (riskDiff !== 0) return riskDiff
+    const daysLeftA = a.daysLeft ?? Number.POSITIVE_INFINITY
+    const daysLeftB = b.daysLeft ?? Number.POSITIVE_INFINITY
+    if (daysLeftA !== daysLeftB) return daysLeftA - daysLeftB
+    return a.currentStock - b.currentStock
+  })
+
+  deadStockAlerts.sort((a, b) => {
+    const riskDiff = riskRank(b.riskLevel) - riskRank(a.riskLevel)
+    if (riskDiff !== 0) return riskDiff
+    if (a.label !== b.label) return a.label === 'DEAD_STOCK' ? -1 : 1
+    return b.currentStock - a.currentStock
+  })
+
+  return {
+    stockWarnings: stockWarnings.slice(0, 5),
+    deadStockAlerts: deadStockAlerts.slice(0, 5),
+  }
+}
+
 function buildOrderDetails(items: ShortageView[]): {
   lines: OwnerOrderLine[]
   aiEstimatedCost: number | null
@@ -419,6 +661,30 @@ ${aiLines.length ? `${aiLines.join('\n')}\n` : ''}---------------------------
 ${order.items.join('\n')}
 
 Shenim: Ju lutem konfirmoni disponueshmerine dhe kohen e dorezimit.`
+}
+
+export function formatOwnerOrderWhatsappMessage(order: OwnerOrder): string {
+  const date = new Date().toLocaleDateString('sq-AL')
+  const aiContext: string[] = []
+  if (order.aiPriority) aiContext.push(`prioritet ${priorityLabel(order.aiPriority)}`)
+  if (order.aiCoverageDays != null) aiContext.push(`mbulim rreth ${order.aiCoverageDays.toFixed(1)} dite`)
+  if (order.aiEstimatedCost != null) aiContext.push(`vlere rreth ${order.aiEstimatedCost.toFixed(2)} EUR`)
+  const aiSummary = aiContext.length ? `AI: ${aiContext.join(', ')}.` : ''
+  const items = order.items.map((item) => `- ${String(item ?? '').replace(/\s+/g, ' ').trim()}`).join('\n')
+
+  return `Pershendetje ${order.supplier},
+
+Po ju dergoj porosine e dates ${date}.
+${aiSummary ? `${aiSummary}\n` : ''}Produktet e kerkuara:
+${items}
+
+Ju lutem na konfirmoni:
+1. Disponueshmerine per secilin produkt
+2. Cmimin e perditesuar
+3. Kohen e dorezimit / ETA
+4. Alternativat nese ndonje artikull mungon
+
+Faleminderit.`
 }
 
 function parseOwnerOrderReceiptAi(receiptText: string): Pick<
@@ -1166,6 +1432,14 @@ export async function getDashboardInsights(
       urgentBreakdown: { urgent, normal },
       weekdayTrend: weekdayLabels.map((day) => ({ day, count: weekdayMap.get(day) ?? 0 })),
       ai,
+      ...buildStockSignals({
+        products,
+        analysisRange,
+        seriesByProduct,
+        urgentRecentByProduct: new Map(
+          shortages.filter((row) => row.urgent).map((row) => [row.productId, Number(row.addedCount ?? 1)])
+        ),
+      }),
     }
   }
   const companyId = await resolveCurrentCompanyId()
@@ -1177,6 +1451,8 @@ export async function getDashboardInsights(
       urgentBreakdown: { urgent: 0, normal: 0 },
       weekdayTrend: emptyWeekdays,
       ai: emptyAiOverview(),
+      stockWarnings: [],
+      deadStockAlerts: [],
     }
   }
 
@@ -1206,17 +1482,6 @@ export async function getDashboardInsights(
       .order('created_at', { ascending: true }),
     resolveProductsInput(productsInput),
   ])
-  if (shortagesRes.error || !shortagesRes.data) {
-    return {
-      shortageTrend: emptyTrend,
-      topSuppliers: [],
-      topProducts: [],
-      urgentBreakdown: { urgent: 0, normal: 0 },
-      weekdayTrend: emptyWeekdays,
-      ai: emptyAiOverview(),
-    }
-  }
-
   const productById = new Map(
     products.map((p) => [
       p.id,
@@ -1227,7 +1492,7 @@ export async function getDashboardInsights(
       },
     ])
   )
-  const normalizedRows = (shortagesRes.data as any[])
+  const normalizedRows = ((shortagesRes.error || !Array.isArray(shortagesRes.data) ? [] : shortagesRes.data) as any[])
     .map((row) => {
       const entryDay = String(row.entry_date ?? '').trim()
       const createdAt = String(row.created_at ?? '').trim()
@@ -1239,17 +1504,6 @@ export async function getDashboardInsights(
       return { day, count, productId, urgent }
     })
     .filter((row) => Boolean(row.day))
-
-  if (!normalizedRows.length) {
-    return {
-      shortageTrend: emptyTrend,
-      topSuppliers: [],
-      topProducts: [],
-      urgentBreakdown: { urgent: 0, normal: 0 },
-      weekdayTrend: emptyWeekdays,
-      ai: emptyAiOverview(),
-    }
-  }
 
   const byDay = new Map<string, number>(dateRange.map((date) => [date, 0]))
   const bySupplier = new Map<string, number>()
@@ -1285,6 +1539,12 @@ export async function getDashboardInsights(
     byProduct.set(product, (byProduct.get(product) ?? 0) + count)
   }
   const seriesByProduct = buildProductDailySeries(analysisRange, normalizedRows)
+  const stockSignals = buildStockSignals({
+    products,
+    analysisRange,
+    seriesByProduct,
+    urgentRecentByProduct,
+  })
   const ai = buildAiOverview(
     [...seriesByProduct.entries()].map(([productId, dailySeries]) => {
       const product = productById.get(productId)
@@ -1306,6 +1566,7 @@ export async function getDashboardInsights(
     urgentBreakdown: { urgent: urgentCount, normal: normalCount },
     weekdayTrend: weekdayLabels.map((day) => ({ day, count: weekdayMap.get(day) ?? 0 })),
     ai,
+    ...stockSignals,
   }
 }
 

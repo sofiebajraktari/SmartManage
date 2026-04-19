@@ -34,9 +34,10 @@ Aplikacioni perdor hash routing.
 | `#/kycu` | Login |
 | `#/mungesat` | Paneli i worker-it |
 | `#/pronari` | Dashboard i owner/manager |
+| `#/produktet` | Produktet, furnitoret dhe AI e stokut |
 | `#/pronari/mungesat` | Mungesat per owner/manager |
 | `#/porosite` | Porosite |
-| `#/import` | Import dhe produkte |
+| `#/import` | Import manual / Excel / CSV |
 | `#/profile` | Profili i llogarise |
 | `#/kompania` | Detajet e kompanise |
 | `#/ekipa` | Ekipi |
@@ -44,7 +45,7 @@ Aplikacioni perdor hash routing.
 
 Shenim:
 
-- `MANAGER` nuk duhet te hyje ne `#/import`, `#/kompania`, `#/ekipa`, `#/settings`
+- `MANAGER` nuk duhet te hyje ne `#/produktet`, `#/import`, `#/kompania`, `#/ekipa`, `#/settings`
 - `WORKER` ridrejtohet te `#/mungesat`
 
 ## Setup lokal

@@ -19,11 +19,12 @@ import {
   deleteProduct,
   deleteShortage,
   formatOwnerOrderReceipt,
+  formatOwnerOrderWhatsappMessage,
   generateOrdersFromShortages,
   getPreferredProductByName,
   getCompanyDetails,
   getDashboardInsights,
- getRecentOrders,
+  getRecentOrders,
   getProducts,
   getSuppliers,
   getTodayShortages,
@@ -66,6 +67,7 @@ const DEFAULT_BRAND_NAME = 'SmartManage'
 const DEFAULT_BRAND_LOGO = '/brand/smartmanage/logo.png'
 type OwnerSection =
   | 'dashboard'
+  | 'produktet'
   | 'mungesat'
   | 'porosite'
   | 'import'
@@ -219,6 +221,8 @@ function buildEmptyDashboardInsights(days: 7 | 14 | 30): DashboardInsights {
       action: 'Mbledh me shume histori per rekomandime me te sakta.',
       topRiskProducts: [],
     },
+    stockWarnings: [],
+    deadStockAlerts: [],
   }
 }
 
@@ -230,6 +234,7 @@ export function renderPronari(
   const host = container as OwnerContainerWithHandle
   const normalizedSection: OwnerSection =
     routeSection === 'dashboard' ||
+    routeSection === 'produktet' ||
     routeSection === 'mungesat' ||
     routeSection === 'porosite' ||
     routeSection === 'import' ||
@@ -394,15 +399,18 @@ export function renderPronari(
   }
   let activeCompanyId = ''
   const needsDashboardInsights = (section: OwnerSection): boolean => section === 'dashboard'
-  const needsShortages = (section: OwnerSection): boolean => section === 'dashboard' || section === 'mungesat'
+  const needsShortages = (section: OwnerSection): boolean =>
+    section === 'dashboard' || section === 'produktet' || section === 'mungesat'
   const needsProducts = (section: OwnerSection): boolean =>
-    section === 'dashboard' || section === 'mungesat' || section === 'import'
+    section === 'dashboard' || section === 'produktet' || section === 'mungesat' || section === 'import'
   const needsRecentOrders = (section: OwnerSection): boolean =>
     section === 'dashboard' || section === 'mungesat' || section === 'porosite'
-  const needsSupplierData = (section: OwnerSection): boolean => section === 'import'
+  const needsSupplierData = (section: OwnerSection): boolean =>
+    section === 'produktet' || section === 'import'
   const needsTeamUsers = (section: OwnerSection): boolean => canSeeSettings && (section === 'settings' || section === 'ekipa')
   const getSectionLabel = (section: OwnerSection): string => {
     if (section === 'dashboard') return 'Dashboard'
+    if (section === 'produktet') return 'Produktet'
     if (section === 'mungesat') return 'Mungesat'
     if (section === 'porosite') return 'Porositë'
     if (section === 'kompania') return 'Kompania'
@@ -412,12 +420,13 @@ export function renderPronari(
     return 'Import'
   }
   const getSectionTitle = (section: OwnerSection): string => {
+    if (section === 'produktet') return 'Produktet dhe inteligjenca e stokut'
     if (section === 'porosite') return 'Porositë të ndara sipas furnitorit'
     if (section === 'kompania') return 'Detajet e kompanisë'
     if (section === 'ekipa') return 'Ekipa e kompanisë'
     if (section === 'profile') return 'Profili i llogarisë'
     if (section === 'settings') return 'Settings'
-    if (section === 'import') return 'Menaxho importin dhe produktet'
+    if (section === 'import') return 'Menaxho importin'
     return ''
   }
   let hasLoadedShortages = false
@@ -1240,6 +1249,351 @@ export function renderPronari(
     })
   }
 
+  function getProductNameDuplicateCountMap(): Map<string, number> {
+    const counts = new Map<string, number>()
+    products.forEach((product) => {
+      const key = normalizeProductNameKey(product.name)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    })
+    return counts
+  }
+
+  function getProductAlternativeRecommendations(product: ProductView, limit = 4) {
+    return recommendAlternativeSuppliers({
+      currentProduct: {
+        id: product.id,
+        name: product.name,
+        supplierId: product.supplierId,
+        supplierName: product.supplierName,
+        category: product.category,
+        aliases: product.aliases ?? [],
+        genericName: product.genericName,
+        unitPrice: product.unitPrice,
+        leadTimeDays: product.leadTimeDays,
+        minOrderQty: product.minOrderQty,
+        offerPriority: product.offerPriority,
+        isActiveOffer: product.isActiveOffer,
+      },
+      products: products.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+        supplierId: candidate.supplierId,
+        supplierName: candidate.supplierName,
+        category: candidate.category,
+        aliases: candidate.aliases ?? [],
+        genericName: candidate.genericName,
+        unitPrice: candidate.unitPrice,
+        leadTimeDays: candidate.leadTimeDays,
+        minOrderQty: candidate.minOrderQty,
+        offerPriority: candidate.offerPriority,
+        isActiveOffer: candidate.isActiveOffer,
+      })),
+      preferredProductByName,
+      limit,
+    })
+  }
+
+  function formatAlternativeLabel(label: string): string {
+    if (label === 'PREFERRED') return 'preferred'
+    if (label === 'FASTEST') return 'ma i shpejti'
+    if (label === 'BEST_VALUE') return 'best value'
+    return 'best match'
+  }
+
+  type ProductAiInsight = {
+    productId: string
+    severity: 'HIGH' | 'MEDIUM' | 'LOW'
+    score: number
+    title: string
+    detail: string
+    action: string
+  }
+
+  function getProductAiInsights(limit = products.length): ProductAiInsight[] {
+    const duplicateNameCount = getProductNameDuplicateCountMap()
+    const shortageByProductId = new Map<string, ShortageView>(
+      shortages.map((shortage) => [shortage.productId, shortage] as const)
+    )
+
+    return products
+      .map((product) => {
+        const key = normalizeProductNameKey(product.name)
+        const duplicateCount = duplicateNameCount.get(key) ?? 0
+        const hasMultipleSuppliers = duplicateCount > 1
+        const isPreferred = preferredProductByName[key] === product.id
+        const stockStatus = getProductStockStatus(product)
+        const stockThreshold = getProductStockThreshold(product)
+        const shortage = shortageByProductId.get(product.id)
+        const topAlternative =
+          stockStatus !== 'ok' || Boolean(shortage) || (hasMultipleSuppliers && !isPreferred)
+            ? getProductAlternativeRecommendations(product, 1)[0]
+            : undefined
+
+        let score = 0
+        if (stockStatus === 'out') score += 55
+        else if (stockStatus === 'low') score += 30
+        if (shortage) score += shortage.urgent ? 35 : 20
+        if (shortage?.aiRiskLevel === 'HIGH') score += 18
+        else if (shortage?.aiRiskLevel === 'MEDIUM') score += 10
+        if (hasMultipleSuppliers && !isPreferred) score += 12
+        if (topAlternative) score += 5
+        if (score <= 0) return null
+
+        const severity: ProductAiInsight['severity'] =
+          score >= 65 ? 'HIGH' : score >= 35 ? 'MEDIUM' : 'LOW'
+
+        if (shortage) {
+          const qty = shortage.aiOptimizedQty ?? shortage.aiSuggestedQty ?? shortage.suggestedQty
+          return {
+            productId: product.id,
+            severity,
+            score,
+            title: shortage.urgent ? 'Mungese urgjente aktive' : 'Mungese aktive sot',
+            detail: shortage.aiReason || `Stok ${product.currentStock}, prag ${stockThreshold}.`,
+            action: qty ? `Ri-porosit rreth ${qty} njesi.` : 'Kaloje ne porosi sot.',
+          }
+        }
+
+        if (stockStatus === 'out') {
+          return {
+            productId: product.id,
+            severity,
+            score,
+            title: 'Produkti eshte pa stok',
+            detail: `Stok 0, prag ${stockThreshold}.`,
+            action: topAlternative
+              ? `Kontrollo ${topAlternative.supplierName} (${formatAlternativeLabel(topAlternative.label)}).`
+              : 'Rishiko porosine e radhes.',
+          }
+        }
+
+        if (stockStatus === 'low') {
+          const stockGap = Math.max(0, stockThreshold - product.currentStock)
+          return {
+            productId: product.id,
+            severity,
+            score,
+            title: 'Stoku eshte nen prag',
+            detail: `Stok ${product.currentStock}, prag ${stockThreshold}, mungojne rreth ${stockGap} njesi.`,
+            action: topAlternative
+              ? `AI sugjeron ${topAlternative.supplierName} si alternative.`
+              : 'Rishiko reorder point.',
+          }
+        }
+
+        return {
+          productId: product.id,
+          severity,
+          score,
+          title: 'Ka furnitore alternative',
+          detail: hasMultipleSuppliers && !isPreferred
+            ? `Ky emer gjendet te ${duplicateCount} furnitore dhe ende s'ka preferred supplier.`
+            : 'Produkti ka furnitor alternativ ne katalog.',
+          action: topAlternative
+            ? `Vendos ${topAlternative.supplierName} ose preferencen e furnitorit.`
+            : 'Vendos preferred supplier.',
+        }
+      })
+      .filter((row): row is ProductAiInsight => row !== null)
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score
+        return compareAlbanian(a.title, b.title)
+      })
+      .slice(0, Math.max(1, limit))
+  }
+
+  function renderProductsAiPanel(): string {
+    if (!products.length) {
+      return `
+        <div class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-500">
+          Shto produktet e para qe AI te nise te jap prioritetet e stokut.
+        </div>
+      `
+    }
+
+    const duplicateNameCount = getProductNameDuplicateCountMap()
+    const shortageByProductId = new Map<string, ShortageView>(
+      shortages.map((shortage) => [shortage.productId, shortage] as const)
+    )
+    const outOfStockCount = products.filter((product) => getProductStockStatus(product) === 'out').length
+    const lowStockCount = products.filter((product) => getProductStockStatus(product) === 'low').length
+    const shortageLinkedCount = products.filter((product) => shortageByProductId.has(product.id)).length
+    const duplicateSupplierCount = products.filter(
+      (product) => (duplicateNameCount.get(normalizeProductNameKey(product.name)) ?? 0) > 1
+    ).length
+    const insights = getProductAiInsights(5)
+
+    const severityClass = (severity: ProductAiInsight['severity']): string => {
+      if (severity === 'HIGH') return 'border-rose-200 bg-rose-50 text-rose-700'
+      if (severity === 'MEDIUM') return 'border-amber-200 bg-amber-50 text-amber-700'
+      return 'border-sky-200 bg-sky-50 text-sky-700'
+    }
+
+    return `
+      <div class="space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <h3 class="text-base font-semibold text-slate-900">AI per produktet</h3>
+            <p class="text-[11px] text-slate-500">Sinjalet lokale bazohen ne stokun aktual, mungesat e sotme dhe furnitoret alternative.</p>
+          </div>
+          <span class="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-[11px] font-semibold text-sky-700">
+            ${insights.length} prioritete
+          </span>
+        </div>
+        <div class="grid gap-2 sm:grid-cols-2">
+          <div class="rounded-xl border border-slate-200 bg-white px-3 py-3">
+            <p class="text-[11px] uppercase tracking-wide text-slate-500">Pa stok</p>
+            <p class="mt-1 text-xl font-semibold text-slate-900">${outOfStockCount}</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white px-3 py-3">
+            <p class="text-[11px] uppercase tracking-wide text-slate-500">Nen prag</p>
+            <p class="mt-1 text-xl font-semibold text-slate-900">${lowStockCount}</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white px-3 py-3">
+            <p class="text-[11px] uppercase tracking-wide text-slate-500">Me mungese aktive</p>
+            <p class="mt-1 text-xl font-semibold text-slate-900">${shortageLinkedCount}</p>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-white px-3 py-3">
+            <p class="text-[11px] uppercase tracking-wide text-slate-500">Me alternativa</p>
+            <p class="mt-1 text-xl font-semibold text-slate-900">${duplicateSupplierCount}</p>
+          </div>
+        </div>
+        <div class="rounded-2xl border border-slate-200 bg-white p-3">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <p class="text-sm font-semibold text-slate-900">Veprimet e sugjeruara</p>
+            <span class="text-[11px] text-slate-500">Top ${insights.length}</span>
+          </div>
+          <ul class="space-y-2">
+            ${
+              insights.length
+                ? insights
+                    .map((insight) => {
+                      const product = products.find((row) => row.id === insight.productId)
+                      return `
+                        <li class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                          <div class="flex items-start justify-between gap-2">
+                            <div class="min-w-0">
+                              <p class="truncate text-sm font-semibold text-slate-900">${product?.name ?? 'Produkt'}</p>
+                              <p class="truncate text-[11px] text-slate-500">${product?.supplierName ?? 'Pa furnitor'}</p>
+                            </div>
+                            <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${severityClass(insight.severity)}">
+                              ${insight.severity}
+                            </span>
+                          </div>
+                          <p class="mt-2 text-xs font-medium text-slate-700">${insight.title}</p>
+                          <p class="mt-1 text-[11px] text-slate-500">${insight.detail}</p>
+                          <p class="mt-1 text-[11px] font-medium text-sky-700">${insight.action}</p>
+                        </li>
+                      `
+                    })
+                    .join('')
+                : '<li class="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">AI nuk ka identifikuar rrezik urgjent per momentin.</li>'
+            }
+          </ul>
+        </div>
+      </div>
+    `
+  }
+
+  function renderProductsList(): string {
+    const productRows = getFilteredProducts()
+    const duplicateNameCount = getProductNameDuplicateCountMap()
+    const shortageByProductId = new Map<string, ShortageView>(
+      shortages.map((shortage) => [shortage.productId, shortage] as const)
+    )
+
+    if (!productRows.length) {
+      return '<li class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">Nuk u gjet asnje produkt per filtrat aktuale.</li>'
+    }
+
+    return productRows
+      .slice(0, 40)
+      .map((product) => {
+        const key = normalizeProductNameKey(product.name)
+        const hasMultipleSuppliers = (duplicateNameCount.get(key) ?? 0) > 1
+        const isPreferred = preferredProductByName[key] === product.id
+        const stockStatus = getProductStockStatus(product)
+        const stockBadgeClass =
+          stockStatus === 'out'
+            ? 'bg-rose-100 text-rose-700'
+            : stockStatus === 'low'
+              ? 'bg-amber-100 text-amber-700'
+              : 'bg-emerald-100 text-emerald-700'
+        const stockLabel =
+          stockStatus === 'out'
+            ? 'Pa stok'
+            : stockStatus === 'low'
+              ? 'Nen prag'
+              : 'Ne rregull'
+        const shortage = shortageByProductId.get(product.id)
+        const topAlternative =
+          stockStatus !== 'ok' || Boolean(shortage) || hasMultipleSuppliers
+            ? getProductAlternativeRecommendations(product, 1)[0]
+            : undefined
+
+        const aiBadges: string[] = []
+        if (shortage?.aiOrderPriority) {
+          aiBadges.push(
+            `<span class="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 font-semibold text-violet-700">AI porosi ${shortage.aiOrderPriority}</span>`
+          )
+        }
+        if (topAlternative) {
+          aiBadges.push(
+            `<span class="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-700">AI alt ${topAlternative.supplierName}</span>`
+          )
+        }
+        if (hasMultipleSuppliers) {
+          aiBadges.push(
+            `<span class="rounded-full px-2 py-0.5 font-semibold ${
+              isPreferred ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'
+            }">${isPreferred ? 'Preferred supplier' : 'AI: zgjidh preferred'}</span>`
+          )
+        }
+
+        const aiLine = shortage?.aiOrderAction
+          ? shortage.aiOrderAction
+          : topAlternative
+            ? `AI sugjeron ${topAlternative.supplierName}: ${topAlternative.reasons.join(', ')}`
+            : hasMultipleSuppliers && !isPreferred
+              ? 'Ka disa furnitore per kete emer; vendos furnitorin preferuar.'
+              : ''
+
+        return `
+          <li class="flex items-start justify-between gap-2 border-b border-slate-200 py-2 text-xs">
+            <div class="min-w-0">
+              <p class="font-medium text-slate-700 truncate">${product.name}</p>
+              <p class="text-slate-500">
+                ${product.supplierName} • ${product.category === 'front' ? 'Front' : 'Barna'} • ${
+                  product.aliases.length ? product.aliases.join(', ') : 'pa emra alternative'
+                }
+              </p>
+              <div class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                <span class="rounded-full px-2 py-0.5 font-semibold ${stockBadgeClass}">${stockLabel}</span>
+                <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-700">Stok ${product.currentStock}</span>
+                <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600">Min ${product.minStock}</span>
+                <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600">RP ${product.reorderPoint}</span>
+              </div>
+              ${aiBadges.length ? `<div class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">${aiBadges.join('')}</div>` : ''}
+              ${aiLine ? `<p class="mt-1 text-[11px] text-slate-500">${aiLine}</p>` : ''}
+            </div>
+            <div class="inline-flex items-center gap-1.5">
+              ${
+                hasMultipleSuppliers
+                  ? `<button data-action="set-preferred-product" data-product-id="${product.id}" title="Zgjidh furnitor preferuar" class="rounded-md border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100">
+                      ${isPreferred ? 'Selected' : 'Prefer'}
+                    </button>`
+                  : ''
+              }
+              <button data-action="adjust-stock" data-product-id="${product.id}" title="Korrigjo stokun" class="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100">${iconStock}</button>
+              <button data-action="edit-product" data-product-id="${product.id}" title="Ndrysho produktin" class="ui-icon-btn">${iconEdit}</button>
+              <button data-action="delete-product" data-product-id="${product.id}" title="Fshi produktin" class="ui-icon-btn">${iconTrash}</button>
+            </div>
+          </li>
+        `
+      })
+      .join('')
+  }
+
   function renderSuppliersList(): string {
     const q = supplierQuery.trim().toLocaleLowerCase('sq-AL')
     const rows = suppliers
@@ -1323,7 +1677,7 @@ export function renderPronari(
         <div class="owner-modal-card w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
           <h3 class="text-lg font-semibold text-slate-900 mb-1">Numri i WhatsApp</h3>
           <p class="text-sm text-slate-600 mb-4">
-            Shkruaj numrin për furnitorin <strong>${supplier}</strong> (shembull: 38344111222).
+            Shkruaj numrin për furnitorin <strong>${supplier}</strong> (shembull: 38344111222). Porosia do të hapet me mesazh AI të strukturuar.
           </p>
           <label class="text-sm text-slate-700 block">
             Numri
@@ -1958,15 +2312,10 @@ export function renderPronari(
 
   function buildReceipt(order: OwnerOrder): string {
     return formatOwnerOrderReceipt(order)
-    const date = new Date().toLocaleString('sq-AL')
-    return `POROSI MUNGESASH
-Data: ${date}
-Furnitori: ${order.supplier}
-ID: #${order.id}
----------------------------
-${order.items.join('\n')}
+  }
 
-Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
+  function buildWhatsAppMessage(order: OwnerOrder): string {
+    return formatOwnerOrderWhatsappMessage(order)
   }
 
   function parseOrderItemForPdf(raw: string): { product: string; qty: number; urgent: boolean } {
@@ -2734,6 +3083,71 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
           </li>`
       })
       .join('')
+    const stockWarningRows = dashboardInsights.stockWarnings
+      .map((item) => {
+        const badgeClass =
+          item.riskLevel === 'HIGH'
+            ? 'border-red-200 bg-red-50 text-red-700'
+            : item.riskLevel === 'MEDIUM'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+        const thresholdLabel =
+          item.reorderPoint > 0 ? `ROP ${item.reorderPoint}` : item.minStock > 0 ? `Min ${item.minStock}` : 'Pa prag'
+        const daysLabel = item.daysLeft != null ? `~${item.daysLeft} dite stok` : `Lead ${item.leadTimeDays}d`
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.name}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.supplierName}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">
+                ${item.riskLevel === 'HIGH' ? 'Shpejt' : item.riskLevel === 'MEDIUM' ? 'Vezhgim' : 'Stabil'}
+              </span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>Stok ${item.currentStock}</span>
+              <span>${thresholdLabel}</span>
+              <span>${daysLabel}</span>
+              <span>AI ${item.recommendedQty}</span>
+            </div>
+            <p class="mt-1 text-[10px] text-slate-500">${item.reason}</p>
+            <p class="mt-1 text-[10px] text-indigo-700">${item.action}</p>
+          </li>`
+      })
+      .join('')
+    const deadStockRows = dashboardInsights.deadStockAlerts
+      .map((item) => {
+        const badgeClass =
+          item.label === 'DEAD_STOCK'
+            ? 'border-rose-200 bg-rose-50 text-rose-700'
+            : 'border-sky-200 bg-sky-50 text-sky-700'
+        const coverageLabel =
+          item.stockCoverageDays != null ? `~${item.stockCoverageDays} dite mbulim` : 'Mbulim i paqarte'
+        const lastSignalLabel =
+          item.daysSinceLastSignal == null ? 'Pa sinjal te fundit' : `${item.daysSinceLastSignal} dite nga sinjali i fundit`
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.name}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.supplierName}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">
+                ${item.label === 'DEAD_STOCK' ? 'Dead stock' : 'Overstock'}
+              </span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>Stok ${item.currentStock}</span>
+              <span>${item.reorderPoint > 0 ? `ROP ${item.reorderPoint}` : `Min ${item.minStock}`}</span>
+              <span>${coverageLabel}</span>
+            </div>
+            <p class="mt-1 text-[10px] text-slate-500">${item.reason}</p>
+            <p class="mt-1 text-[10px] text-slate-500">${lastSignalLabel}</p>
+            <p class="mt-1 text-[10px] text-indigo-700">${item.action}</p>
+          </li>`
+      })
+      .join('')
     const weekdayData =
       dashboardInsights.weekdayTrend.length > 0
         ? dashboardInsights.weekdayTrend
@@ -2843,6 +3257,16 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
           <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
             <p class="mb-2 text-xs font-semibold text-slate-700">Prioritetet e AI per ri-porosi</p>
             <ul class="space-y-1.5">${aiPriorityRows || '<li class="text-xs text-slate-500">AI ende nuk ka mjaft histori per te renditur produkte prioritare.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">AI early warning para mungeses</p>
+            <p class="mb-2 text-[10px] text-slate-500">Bazuar ne stokun aktual, pragjet e ri-porosise dhe ritmin e mungesave.</p>
+            <ul class="space-y-1.5">${stockWarningRows || '<li class="text-xs text-slate-500">Nuk ka produkte qe kerkojne nderhyrje te shpejte per momentin.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">AI dead stock / overstock</p>
+            <p class="mb-2 text-[10px] text-slate-500">Sinjale per stok te bllokuar ose sasira me te larta se ritmi aktual.</p>
+            <ul class="space-y-1.5">${deadStockRows || '<li class="text-xs text-slate-500">Nuk ka sinjale te forta per dead stock ose overstock.</li>'}</ul>
           </div>
           <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
             <p class="mb-2 text-xs font-semibold text-slate-700">Urgjente vs normale</p>
@@ -3459,6 +3883,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     const tableBody = document.getElementById('owner-shortage-body')
     const ordersList = document.getElementById('owner-orders-list')
     const productsList = document.getElementById('owner-products-list')
+    const productsAiPanel = document.getElementById('owner-products-ai-panel')
     const importPreview = document.getElementById('owner-import-preview')
     const profilePanel = document.getElementById('owner-profile-panel')
     const settingsPanel = document.getElementById('owner-settings-panel')
@@ -3484,11 +3909,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     }
     if (productsList) {
       const productRows = getFilteredProducts()
-      const duplicateNameCount = new Map<string, number>()
-      products.forEach((p) => {
-        const key = normalizeProductNameKey(p.name)
-        duplicateNameCount.set(key, (duplicateNameCount.get(key) ?? 0) + 1)
-      })
+      const duplicateNameCount = getProductNameDuplicateCountMap()
       const lowStockCount = products.filter((product) => getProductStockStatus(product) !== 'ok').length
       productsList.innerHTML = productRows
         .slice(0, 40)
@@ -3551,10 +3972,12 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
       if (count) count.textContent = `${productRows.length}/${products.length}`
       const lowStock = document.getElementById('owner-products-low-stock-count')
       if (lowStock) lowStock.textContent = String(lowStockCount)
+      productsList.innerHTML = renderProductsList()
     }
-    const suppliersList = document.getElementById('owner-suppliers-list')
+    if (productsAiPanel) productsAiPanel.innerHTML = renderProductsAiPanel()
+    const suppliersList = document.getElementById('owner-products-suppliers-list')
     if (suppliersList) suppliersList.innerHTML = renderSuppliersList()
-    const suppliersCount = document.getElementById('owner-suppliers-count')
+    const suppliersCount = document.getElementById('owner-products-suppliers-count')
     if (suppliersCount) suppliersCount.textContent = String(suppliers.length)
     const supplierOptions = document.getElementById('owner-supplier-options')
     if (supplierOptions) {
@@ -3562,7 +3985,13 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
         .map((s) => `<option value="${s.name}"></option>`)
         .join('')
     }
-    const supplierSearchInput = document.getElementById('owner-suppliers-search') as HTMLInputElement | null
+    const productsSupplierOptions = document.getElementById('owner-products-supplier-options')
+    if (productsSupplierOptions) {
+      productsSupplierOptions.innerHTML = suppliers
+        .map((s) => `<option value="${s.name}"></option>`)
+        .join('')
+    }
+    const supplierSearchInput = document.getElementById('owner-products-suppliers-search') as HTMLInputElement | null
     if (supplierSearchInput && supplierSearchInput.value !== supplierQuery) supplierSearchInput.value = supplierQuery
     const countTop = document.getElementById('owner-products-count-top')
     if (countTop) countTop.textContent = `${products.length}`
@@ -3644,7 +4073,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     ownerProductCategoryFilter === v ? 'selected' : ''
   const companyBrand = getCompanyBrand(companyDetails)
   const topSearchPlaceholder = canAccessOwnerOnlySections
-    ? 'Search and jump (dashboard, mungesat, porosite, import, ekipa, kompania, settings)'
+    ? 'Search and jump (dashboard, produktet, mungesat, porosite, import, ekipa, kompania, settings)'
     : 'Search and jump (dashboard, mungesat, porosite, profile)'
 
   container.innerHTML = `
@@ -3665,6 +4094,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
           <p class="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">NAVIGIMI</p>
           <nav class="space-y-1 text-sm">
             <a href="#/pronari" data-owner-nav="dashboard" class="${active('dashboard')}"><span class="premium-nav-dot"></span>Dashboard</a>
+            ${canAccessOwnerOnlySections ? `<a href="#/produktet" data-owner-nav="produktet" class="${active('produktet')}"><span class="premium-nav-dot"></span>Produktet</a>` : ''}
             <a href="#/pronari/mungesat" data-owner-nav="mungesat" class="${active('mungesat')}"><span class="premium-nav-dot"></span>Mungesat</a>
             <a href="#/porosite" class="${active('porosite')}"><span class="premium-nav-dot"></span>Porositë</a>
             ${canAccessOwnerOnlySections ? `<a href="#/import" class="${active('import')}"><span class="premium-nav-dot"></span>Import</a>` : ''}
@@ -3714,6 +4144,8 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
               <p id="owner-header-eyebrow" class="text-sm font-semibold uppercase tracking-wide text-slate-600">${
                 currentSection === 'dashboard'
                   ? 'Dashboard'
+                  : currentSection === 'produktet'
+                    ? 'Produktet'
                   : currentSection === 'mungesat'
                     ? 'Mungesat'
                     : currentSection === 'porosite'
@@ -3732,7 +4164,9 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                 currentSection === 'mungesat' || currentSection === 'dashboard'
                   ? ''
                   : `<h1 id="owner-header-title" class="text-xl md:text-2xl font-semibold tracking-tight text-slate-900">${
-                      currentSection === 'porosite'
+                      currentSection === 'produktet'
+                        ? 'Produktet dhe inteligjenca e stokut'
+                        : currentSection === 'porosite'
                         ? 'Porositë të ndara sipas furnitorit'
                         : currentSection === 'kompania'
                           ? 'Detajet e kompanisë'
@@ -3742,7 +4176,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                           ? 'Profili i llogarisë'
                           : currentSection === 'settings'
                             ? 'Settings'
-                        : 'Menaxho importin dhe produktet'
+                        : 'Menaxho importin'
                     }</h1>`
               }
               </div>
@@ -3761,6 +4195,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                   />
                   <datalist id="owner-advanced-search-options">
                     <option value="dashboard"></option>
+                    ${canAccessOwnerOnlySections ? '<option value="produktet"></option>' : ''}
                     <option value="mungesat"></option>
                     <option value="porosite"></option>
                     ${canAccessOwnerOnlySections ? '<option value="import"></option>' : ''}
@@ -3841,6 +4276,89 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
         <section class="relative z-0 grid gap-4">
           <div id="owner-dashboard-panel" class="${currentSection === 'dashboard' ? '' : 'hidden '}space-y-3">
             ${renderDashboardPanel()}
+          </div>
+          <div id="owner-products-panel" class="${currentSection === 'produktet' ? '' : 'hidden '}space-y-3">
+            <div class="grid gap-3 xl:grid-cols-[1.2fr_0.8fr]">
+              <div class="space-y-3">
+                <div class="premium-card p-4">
+                  <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 class="text-base font-semibold text-slate-900">Shto produkt te ri</h3>
+                      <p class="text-[11px] text-slate-500">Regjistro barnat dhe artikujt e frontit pa hyre te importi.</p>
+                    </div>
+                    <span class="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
+                      Owner only
+                    </span>
+                  </div>
+                  <form id="owner-products-create-form" class="grid gap-2 md:grid-cols-2">
+                    <input id="owner-products-create-name" type="text" placeholder="Emri i produktit (p.sh. Paracetamol 500mg)" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none md:col-span-2" />
+                    <input id="owner-products-create-supplier" type="text" list="owner-products-supplier-options" placeholder="Furnitori" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                    <select id="owner-products-create-category" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs focus:outline-none">
+                      <option value="barna">Barna</option>
+                      <option value="front">Front</option>
+                    </select>
+                    <input id="owner-products-create-min-stock" type="number" min="0" step="1" placeholder="Min stock" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                    <input id="owner-products-create-reorder-point" type="number" min="0" step="1" placeholder="Reorder point" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                    <input id="owner-products-create-initial-stock" type="number" min="0" step="1" placeholder="Stok fillestar (opsional)" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none md:col-span-2" />
+                    <input id="owner-products-create-aliases" type="text" placeholder="Emra alternativë (opsional), ndarë me presje" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none md:col-span-2" />
+                    <datalist id="owner-products-supplier-options"></datalist>
+                    <button type="submit" class="premium-btn-primary w-full rounded-lg px-3 py-1.5 text-xs font-semibold md:col-span-2">
+                      Shto produkt
+                    </button>
+                  </form>
+                </div>
+
+                <div class="premium-card p-4">
+                  <div class="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <h4 class="text-sm font-semibold text-slate-900">Furnitorët</h4>
+                      <span class="text-[11px] text-slate-500">Total: <span id="owner-products-suppliers-count">0</span></span>
+                    </div>
+                    <form id="owner-products-supplier-form" class="mb-2 flex flex-col gap-2 sm:flex-row">
+                      <input id="owner-products-supplier-name" type="text" placeholder="Shto furnitor të ri" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                      <button type="submit" class="premium-btn-primary rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap">Add supplier</button>
+                    </form>
+                    <input id="owner-products-suppliers-search" type="text" placeholder="Kërko furnitor..." class="premium-input mb-2 w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                    <ul id="owner-products-suppliers-list" class="max-h-44 space-y-1.5 overflow-auto pr-1"></ul>
+                  </div>
+                </div>
+              </div>
+
+              <div class="premium-card p-4">
+                <div id="owner-products-ai-panel">${renderProductsAiPanel()}</div>
+              </div>
+            </div>
+
+            <div class="premium-card p-4">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <h3 class="text-base font-semibold text-slate-900">Produkte ekzistuese</h3>
+                <div class="text-[11px] text-slate-500">
+                  Shfaqur: <span id="owner-products-count">${products.length}</span>
+                  <span class="mx-1.5">•</span>
+                  Nën prag: <span id="owner-products-low-stock-count">0</span>
+                </div>
+              </div>
+              <div class="owner-products-filters mb-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                <label class="flex items-center gap-1.5 text-[11px] text-slate-600 whitespace-nowrap">
+                  <span class="text-slate-500">Shfaq:</span>
+                  <select id="owner-products-category-filter" class="premium-input rounded-lg px-2 py-1 text-xs focus:outline-none max-w-44" aria-label="Filtro sipas kategorisë së produktit">
+                    <option value="barna" ${selIfImportCat('barna')}>Vetëm barna</option>
+                    <option value="all" ${selIfImportCat('all')}>Barna + front</option>
+                    <option value="front" ${selIfImportCat('front')}>Vetëm front</option>
+                  </select>
+                </label>
+              </div>
+              <div class="owner-products-toolbar mb-2 grid gap-2 md:grid-cols-[1fr_auto]">
+                <input id="owner-products-search" type="text" placeholder="Kërko sipas emrit, furnitorit ose emrave alternativë..." class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                <select id="owner-products-sort" class="premium-input rounded-lg px-2.5 py-1.5 text-xs focus:outline-none">
+                  <option value="name">Rendit: Emri</option>
+                  <option value="supplier">Rendit: Furnitori</option>
+                  <option value="category">Rendit: Kategoria</option>
+                  <option value="stock">Rendit: Stoku</option>
+                </select>
+              </div>
+              <ul id="owner-products-list" class="max-h-[32rem] overflow-auto pr-1">${renderProductsList()}</ul>
+            </div>
           </div>
           <div id="owner-shortages-panel" class="${currentSection === 'mungesat' ? '' : 'hidden '}premium-card p-4 md:p-5">
             <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
@@ -3966,31 +4484,31 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                 </div>
               </div>
 
-              <div class="premium-card p-4">
+              <div id="owner-import-products-legacy" class="hidden premium-card p-4">
                 <div class="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
                     <h4 class="text-sm font-semibold text-slate-900">Suppliers</h4>
-                    <span class="text-[11px] text-slate-500">Total: <span id="owner-suppliers-count">0</span></span>
+                    <span class="text-[11px] text-slate-500">Total: <span id="owner-import-suppliers-count-legacy">0</span></span>
                   </div>
-                  <form id="owner-supplier-form" class="owner-supplier-form mb-2 flex flex-col gap-2 sm:flex-row">
-                    <input id="owner-supplier-name" type="text" placeholder="Shto furnitor të ri" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                  <form id="owner-import-supplier-form-legacy" class="owner-supplier-form mb-2 flex flex-col gap-2 sm:flex-row">
+                    <input id="owner-import-supplier-name-legacy" type="text" placeholder="Shto furnitor të ri" class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
                     <button type="submit" class="premium-btn-primary rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap">Add supplier</button>
                   </form>
-                  <input id="owner-suppliers-search" type="text" placeholder="Kërko furnitor..." class="premium-input mb-2 w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
-                  <ul id="owner-suppliers-list" class="max-h-44 space-y-1.5 overflow-auto pr-1"></ul>
+                  <input id="owner-import-suppliers-search-legacy" type="text" placeholder="Kërko furnitor..." class="premium-input mb-2 w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                  <ul id="owner-import-suppliers-list-legacy" class="max-h-44 space-y-1.5 overflow-auto pr-1"></ul>
                 </div>
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <h3 class="text-base font-semibold text-slate-900">Produkte ekzistuese</h3>
                   <div class="text-[11px] text-slate-500">
-                    Shfaqur: <span id="owner-products-count">${products.length}</span>
+                    Shfaqur: <span id="owner-import-products-count-legacy">${products.length}</span>
                     <span class="mx-1.5">•</span>
-                    Nen prag: <span id="owner-products-low-stock-count">0</span>
+                    Nen prag: <span id="owner-import-products-low-stock-count-legacy">0</span>
                   </div>
                 </div>
                 <div class="owner-products-filters mb-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
                   <label class="flex items-center gap-1.5 text-[11px] text-slate-600 whitespace-nowrap">
                     <span class="text-slate-500">Shfaq:</span>
-                    <select id="owner-products-category-filter" class="premium-input rounded-lg px-2 py-1 text-xs focus:outline-none max-w-44" aria-label="Filtro sipas kategorisë së produktit">
+                    <select id="owner-import-products-category-filter-legacy" class="premium-input rounded-lg px-2 py-1 text-xs focus:outline-none max-w-44" aria-label="Filtro sipas kategorisë së produktit">
                       <option value="barna" ${selIfImportCat('barna')}>Vetëm barna</option>
                       <option value="all" ${selIfImportCat('all')}>Barna + front</option>
                       <option value="front" ${selIfImportCat('front')}>Vetëm front</option>
@@ -3998,15 +4516,15 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
                   </label>
                 </div>
                 <div class="owner-products-toolbar mb-2 grid gap-2 md:grid-cols-[1fr_auto]">
-                  <input id="owner-products-search" type="text" placeholder="Kërko sipas emrit, furnitorit ose emrave alternativë..." class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
-                  <select id="owner-products-sort" class="premium-input rounded-lg px-2.5 py-1.5 text-xs focus:outline-none">
+                  <input id="owner-import-products-search-legacy" type="text" placeholder="Kërko sipas emrit, furnitorit ose emrave alternativë..." class="premium-input w-full rounded-lg px-2.5 py-1.5 text-xs placeholder:text-slate-400 focus:outline-none" />
+                  <select id="owner-import-products-sort-legacy" class="premium-input rounded-lg px-2.5 py-1.5 text-xs focus:outline-none">
                     <option value="name">Rendit: Emri</option>
                     <option value="supplier">Rendit: Furnitori</option>
                     <option value="category">Rendit: Kategoria</option>
                     <option value="stock">Rendit: Stoku</option>
                   </select>
                 </div>
-                <ul id="owner-products-list" class="max-h-56 overflow-auto pr-1"></ul>
+                <ul id="owner-import-products-list-legacy" class="max-h-56 overflow-auto pr-1"></ul>
               </div>
           </div>
           <div id="owner-profile-panel" class="${currentSection === 'profile' ? '' : 'hidden '}space-y-3">
@@ -4055,6 +4573,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
   }
   const navHrefBySection: Partial<Record<OwnerSection, string>> = {
     dashboard: '#/pronari',
+    produktet: '#/produktet',
     mungesat: '#/pronari/mungesat',
     porosite: '#/porosite',
     import: '#/import',
@@ -4104,6 +4623,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     })
     toggleSectionVisibility('owner-dashboard-kpis', currentSection === 'dashboard')
     toggleSectionVisibility('owner-dashboard-panel', currentSection === 'dashboard')
+    toggleSectionVisibility('owner-products-panel', currentSection === 'produktet')
     toggleSectionVisibility('owner-shortages-panel', currentSection === 'mungesat')
     toggleSectionVisibility('owner-orders-wrapper', currentSection === 'mungesat' || currentSection === 'porosite')
     toggleSectionVisibility('owner-import-panel', currentSection === 'import')
@@ -4318,9 +4838,17 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
   const productReorderPointInput = document.getElementById('owner-product-reorder-point') as HTMLInputElement | null
   const productInitialStockInput = document.getElementById('owner-product-initial-stock') as HTMLInputElement | null
   const productAliasesInput = document.getElementById('owner-product-aliases') as HTMLInputElement | null
-  const supplierForm = document.getElementById('owner-supplier-form') as HTMLFormElement | null
-  const supplierNameInput = document.getElementById('owner-supplier-name') as HTMLInputElement | null
-  const supplierSearchInput = document.getElementById('owner-suppliers-search') as HTMLInputElement | null
+  const productsCreateForm = document.getElementById('owner-products-create-form') as HTMLFormElement | null
+  const productsCreateNameInput = document.getElementById('owner-products-create-name') as HTMLInputElement | null
+  const productsCreateSupplierInput = document.getElementById('owner-products-create-supplier') as HTMLInputElement | null
+  const productsCreateCategoryInput = document.getElementById('owner-products-create-category') as HTMLSelectElement | null
+  const productsCreateMinStockInput = document.getElementById('owner-products-create-min-stock') as HTMLInputElement | null
+  const productsCreateReorderPointInput = document.getElementById('owner-products-create-reorder-point') as HTMLInputElement | null
+  const productsCreateInitialStockInput = document.getElementById('owner-products-create-initial-stock') as HTMLInputElement | null
+  const productsCreateAliasesInput = document.getElementById('owner-products-create-aliases') as HTMLInputElement | null
+  const productsSupplierForm = document.getElementById('owner-products-supplier-form') as HTMLFormElement | null
+  const productsSupplierNameInput = document.getElementById('owner-products-supplier-name') as HTMLInputElement | null
+  const productsSupplierSearchInput = document.getElementById('owner-products-suppliers-search') as HTMLInputElement | null
   const ownerShortageAddForm = document.getElementById('owner-shortage-add-form') as HTMLFormElement | null
   const ownerShortageAddProductInput = document.getElementById('owner-shortage-add-product') as HTMLInputElement | null
   const ownerShortageAddProductIdInput = document.getElementById('owner-shortage-add-product-id') as HTMLInputElement | null
@@ -4369,6 +4897,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     ]
     if (canAccessOwnerOnlySections) {
       routeMatches.push(
+        { keys: ['produktet', 'produkti', 'barnat', 'katalogu'], hash: '#/produktet' },
         { keys: ['import', 'excel', 'csv'], hash: '#/import' },
         { keys: ['ekipa', 'team', 'users'], hash: '#/ekipa' },
         { keys: ['kompania', 'company'], hash: '#/kompania' },
@@ -4388,7 +4917,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
       return
     }
     if (hasProduct) {
-      navigateHash('#/pronari/mungesat')
+      navigateHash(canAccessOwnerOnlySections ? '#/produktet' : '#/pronari/mungesat')
       return
     }
     navigateHash('#/pronari/mungesat')
@@ -4433,8 +4962,8 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     productQuery = productSearchInput.value
     refreshUI()
   })
-  supplierSearchInput?.addEventListener('input', () => {
-    supplierQuery = supplierSearchInput.value
+  productsSupplierSearchInput?.addEventListener('input', () => {
+    supplierQuery = productsSupplierSearchInput.value
     refreshUI()
   })
 
@@ -4470,7 +4999,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     products = await getProducts()
     suppliers = await getSuppliers()
     preferredProductByName = await getPreferredProductByName()
-    productForm.reset()
+    productForm?.reset()
     if (productCategoryInput) productCategoryInput.value = 'barna'
     if (productMinStockInput) productMinStockInput.value = ''
     if (productReorderPointInput) productReorderPointInput.value = ''
@@ -4479,9 +5008,50 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
     showToast('Bari u shtua. Do të dalë edhe te punëtori.')
   })
 
-  supplierForm?.addEventListener('submit', async (event) => {
+  productsCreateForm?.addEventListener('submit', async (event) => {
     event.preventDefault()
-    const supplierName = (supplierNameInput?.value ?? '').trim()
+    const name = productsCreateNameInput?.value ?? ''
+    const supplier = productsCreateSupplierInput?.value ?? ''
+    const category = productsCreateCategoryInput?.value === 'front' ? 'front' : 'barna'
+    const aliases = parseAliasesInput(productsCreateAliasesInput?.value ?? '')
+    const minStock = Math.max(0, parseWholeNumberInput(productsCreateMinStockInput?.value ?? '0', 0))
+    const reorderPoint = Math.max(
+      0,
+      parseWholeNumberInput(productsCreateReorderPointInput?.value ?? String(minStock), minStock)
+    )
+    const initialStock = Math.max(0, parseWholeNumberInput(productsCreateInitialStockInput?.value ?? '0', 0))
+
+    const result = await addProduct({ name, supplier, category, aliases, minStock, reorderPoint })
+    if (!result.ok) {
+      showToast(result.message)
+      return
+    }
+    if (initialStock > 0 && result.productId && !result.existed) {
+      const stockResult = await adjustProductStock({
+        productId: result.productId,
+        quantityDelta: initialStock,
+        movementType: 'INITIAL_COUNT',
+        note: 'Stok fillestar',
+      })
+      if (!stockResult.ok) {
+        showToast(stockResult.message)
+      }
+    }
+    products = await getProducts()
+    suppliers = await getSuppliers()
+    preferredProductByName = await getPreferredProductByName()
+    productsCreateForm?.reset()
+    if (productsCreateCategoryInput) productsCreateCategoryInput.value = 'barna'
+    if (productsCreateMinStockInput) productsCreateMinStockInput.value = ''
+    if (productsCreateReorderPointInput) productsCreateReorderPointInput.value = ''
+    if (productsCreateInitialStockInput) productsCreateInitialStockInput.value = ''
+    refreshUI()
+    showToast('Produkti u shtua te katalogu.')
+  })
+
+  productsSupplierForm?.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const supplierName = (productsSupplierNameInput?.value ?? '').trim()
     if (!supplierName) {
       showToast('Shkruaj emrin e furnitorit.')
       return
@@ -4492,7 +5062,7 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
       return
     }
     suppliers = await getSuppliers()
-    if (supplierNameInput) supplierNameInput.value = ''
+    if (productsSupplierNameInput) productsSupplierNameInput.value = ''
     refreshUI()
     showToast('Furnitori u shtua.')
   })
@@ -5254,10 +5824,10 @@ Shënim: Ju lutem konfirmoni disponueshmërinë dhe kohën e dorëzimit.`
       }
       phones[order.supplier] = phone
       setSupplierPhones(phones)
-      const text = buildReceipt(order)
+      const text = buildWhatsAppMessage(order)
       const url = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`
       window.open(url, '_blank', 'noopener,noreferrer')
-      showToast('WhatsApp u hap me reciptin — dërgojeni furnitorit.')
+      showToast('WhatsApp u hap me mesazhin AI — dërgojeni furnitorit.')
       return
     }
 
