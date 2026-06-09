@@ -96,6 +96,81 @@ export interface AiReorderPlan {
   action: string
 }
 
+export interface AiSafetyStockInput {
+  dailySeries: number[]
+  leadTimeDays?: number
+  currentReorderPoint?: number
+  currentMinStock?: number
+  serviceLevel?: 'STANDARD' | 'HIGH' | 'CRITICAL'
+  urgentNow?: boolean
+}
+
+// ============ SEASONAL & TREND ANALYSIS ============
+export interface SeasonalTrendAnalysis {
+  hasSeasonal: boolean
+  seasonalScore: number // 0-100
+  peakDays: number[] // Ditet me demand maksimal (day of week: 0-6)
+  lowDays: number[] // Ditet me demand minimal
+  monthlyPattern?: number[] // Ndryshim mesatar për çdo muaj
+  trendDirection: 'UP' | 'DOWN' | 'STABLE'
+  volatilityIndex: number
+}
+
+export interface SupplierReliabilityMetrics {
+  supplierId?: string
+  supplierName: string
+  onTimeDeliveryRate: number // 0-100, përqindja e porosive në kohë
+  averageLeadTime: number // ditë
+  leadTimeVariance: number // std dev e lead time
+  orderAccuracyRate: number // % e porosive pa gabime
+  responseTime: number // orë mesatare për response
+  priceStability: number // 0-100, sa stabil janë çmimet
+  minimumReliabilityScore: number // 0-100
+}
+
+export interface PriceTrendAnalysis {
+  currentPrice: number
+  avgPrice30Days: number
+  priceChange7Days: number // % ndryshim
+  priceChange30Days: number
+  trendDirection: 'UP' | 'DOWN' | 'STABLE'
+  volatility: number // std dev e çmimit
+  expectedPriceIn7Days: number
+  seasonalPriceAdjustment: number
+}
+
+export interface LeadTimePrediction {
+  expectedDays: number
+  confidenceLevel: number // 0-100
+  minDays: number
+  maxDays: number
+  seasonalAdjustment: number // ditë shtesë për sezonë peak
+  supplierHistoryLength: number // ditë të të dhënave historike
+}
+
+export interface DemandPatternType {
+  type: 'STEADY' | 'SEASONAL' | 'SPORADIC' | 'TRENDING_UP' | 'TRENDING_DOWN' | 'CYCLICAL'
+  confidence: number
+  description: string
+}
+
+// ============ EXISTING INTERFACES ============
+
+
+export interface AiSafetyStockPlan {
+  averageDailyDemand: number
+  demandStdDev: number
+  leadTimeDays: number
+  serviceLevel: 'STANDARD' | 'HIGH' | 'CRITICAL'
+  serviceFactor: number
+  safetyStock: number
+  dynamicReorderPoint: number
+  reorderPointDelta: number
+  confidence: number
+  riskLevel: AiRiskLevel
+  reason: string
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
