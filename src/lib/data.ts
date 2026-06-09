@@ -129,6 +129,10 @@ export interface AiStockEarlyWarning {
   forecastNext7Days: number
   daysLeft: number | null
   leadTimeDays: number
+  safetyStock: number
+  dynamicReorderPoint: number
+  reorderPointDelta: number
+  serviceLevel: 'STANDARD' | 'HIGH' | 'CRITICAL'
   recommendedQty: number
   riskLevel: AiRiskLevel
   reason: string
