@@ -448,6 +448,16 @@ function sum(values: number[]): number {
   return values.reduce((total, value) => total + value, 0)
 }
 
+function mean(values: number[]): number {
+  return values.length ? sum(values) / values.length : 0
+}
+
+function stdDev(values: number[]): number {
+  if (!values.length) return 0
+  const avg = mean(values)
+  return Math.sqrt(mean(values.map((value) => (value - avg) ** 2)))
+}
+
 function toRiskLevel(score: number): AiRiskLevel {
   if (score >= 70) return 'HIGH'
   if (score >= 45) return 'MEDIUM'
@@ -473,6 +483,22 @@ function daysSinceLastPositiveSignal(series: number[]): number | null {
   return null
 }
 
+function normalizeQualityText(value: string): string {
+  return value
+    .trim()
+    .toLocaleLowerCase('sq-AL')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(tbl|tab|tablet|caps|capsule|kaps|kapsule|sirup|syrup)\b/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function qualityIssueRank(issue: AiDataQualityIssue): number {
+  return riskRank(issue.severity) * 100 + (issue.category === 'DUPLICATE' ? 15 : issue.category === 'STOCK' ? 12 : 0)
+}
+
 function buildStockSignals(input: {
   products: ProductView[]
   analysisRange: string[]
@@ -490,6 +516,13 @@ function buildStockSignals(input: {
     const stockThreshold = Math.max(reorderPoint, minStock)
     const leadTimeDays = Math.max(1, Math.round(Number(product.leadTimeDays ?? 2)))
     const urgentNow = (input.urgentRecentByProduct.get(product.id) ?? 0) > 0
+    const safetyPlan = calculateDynamicSafetyStock({
+      dailySeries,
+      leadTimeDays,
+      currentReorderPoint: reorderPoint,
+      currentMinStock: minStock,
+      urgentNow,
+    })
     const forecast = forecastProductDemand({
       productId: product.id,
       name: product.name,
@@ -566,9 +599,13 @@ function buildStockSignals(input: {
         forecastNext7Days: forecast.forecastNext7Days,
         daysLeft,
         leadTimeDays,
+        safetyStock: safetyPlan.safetyStock,
+        dynamicReorderPoint: safetyPlan.dynamicReorderPoint,
+        reorderPointDelta: safetyPlan.reorderPointDelta,
+        serviceLevel: safetyPlan.serviceLevel,
         recommendedQty: reorderPlan.optimizedQty,
-        riskLevel: warningRiskLevel,
-        reason: reasonParts.join(', '),
+        riskLevel: riskRank(safetyPlan.riskLevel) > riskRank(warningRiskLevel) ? safetyPlan.riskLevel : warningRiskLevel,
+        reason: `${reasonParts.join(', ')}; SS ${safetyPlan.safetyStock}, ROP AI ${safetyPlan.dynamicReorderPoint}`,
         action,
       })
     }
@@ -641,6 +678,453 @@ function buildStockSignals(input: {
     stockWarnings: stockWarnings.slice(0, 5),
     deadStockAlerts: deadStockAlerts.slice(0, 5),
   }
+}
+
+function buildAbcXyzAnalysis(input: {
+  products: ProductView[]
+  seriesByProduct: Map<string, number[]>
+}): AiAbcXyzProduct[] {
+  const scored = input.products
+    .map((product) => {
+      const series = input.seriesByProduct.get(product.id) ?? buildEmptySeries(30)
+      const totalSignals = sum(series)
+      const avg = mean(series)
+      const variability = avg > 0 ? roundOne(stdDev(series) / Math.max(avg, 0.1)) : 0
+      return { product, totalSignals, variability }
+    })
+    .filter((row) => row.totalSignals > 0 || Number(row.product.currentStock ?? 0) > 0)
+    .sort((a, b) => b.totalSignals - a.totalSignals)
+
+  const totalDemand = Math.max(1, scored.reduce((total, row) => total + row.totalSignals, 0))
+  let cumulative = 0
+
+  return scored
+    .map((row) => {
+      cumulative += row.totalSignals
+      const share = cumulative / totalDemand
+      const abcClass: AiAbcXyzProduct['abcClass'] = share <= 0.8 ? 'A' : share <= 0.95 ? 'B' : 'C'
+      const xyzClass: AiAbcXyzProduct['xyzClass'] =
+        row.variability <= 0.45 ? 'X' : row.variability <= 1.05 ? 'Y' : 'Z'
+      const combinedClass = `${abcClass}-${xyzClass}`
+      const riskLevel: AiRiskLevel =
+        abcClass === 'A' && xyzClass === 'Z' ? 'HIGH' : abcClass === 'A' || xyzClass === 'Z' ? 'MEDIUM' : 'LOW'
+      const recommendedPolicy =
+        abcClass === 'A' && xyzClass === 'Z'
+          ? 'Mbaj safety stock te larte dhe kontroll javor.'
+          : abcClass === 'A'
+            ? 'Prioritet per furnizim dhe monitorim te afert.'
+            : xyzClass === 'Z'
+              ? 'Porosit konservativisht; kerkesa eshte e paparashikueshme.'
+              : 'Menaxhim rutine me prag standard.'
+      return {
+        productId: row.product.id,
+        name: row.product.name,
+        supplierName: row.product.supplierName,
+        abcClass,
+        xyzClass,
+        combinedClass,
+        totalSignals: row.totalSignals,
+        variability: row.variability,
+        recommendedPolicy,
+        riskLevel,
+      }
+    })
+    .sort((a, b) => {
+      const riskDiff = riskRank(b.riskLevel) - riskRank(a.riskLevel)
+      if (riskDiff !== 0) return riskDiff
+      return b.totalSignals - a.totalSignals
+    })
+    .slice(0, 6)
+}
+
+function buildSupplierScorecards(input: {
+  products: ProductView[]
+  seriesByProduct: Map<string, number[]>
+  urgentRecentByProduct: Map<string, number>
+  stockWarnings: AiStockEarlyWarning[]
+  abcXyzProducts: AiAbcXyzProduct[]
+}): AiSupplierScorecard[] {
+  const bySupplier = new Map<
+    string,
+    {
+      productCount: number
+      shortageCount: number
+      urgentCount: number
+      criticalProductCount: number
+      leadTimes: number[]
+      alternativePressure: number
+    }
+  >()
+  const duplicateNames = new Map<string, Set<string>>()
+  input.products.forEach((product) => {
+    const key = product.name.trim().toLocaleLowerCase('sq-AL')
+    const set = duplicateNames.get(key) ?? new Set<string>()
+    set.add(product.supplierName)
+    duplicateNames.set(key, set)
+  })
+  const warningByProduct = new Set(input.stockWarnings.map((row) => row.productId))
+  const criticalByProduct = new Set(
+    input.abcXyzProducts.filter((row) => row.riskLevel !== 'LOW').map((row) => row.productId)
+  )
+
+  input.products.forEach((product) => {
+    const supplierName = product.supplierName || 'Pa furnitor'
+    const row = bySupplier.get(supplierName) ?? {
+      productCount: 0,
+      shortageCount: 0,
+      urgentCount: 0,
+      criticalProductCount: 0,
+      leadTimes: [],
+      alternativePressure: 0,
+    }
+    const series = input.seriesByProduct.get(product.id) ?? []
+    row.productCount += 1
+    row.shortageCount += sum(series)
+    row.urgentCount += input.urgentRecentByProduct.get(product.id) ?? 0
+    if (warningByProduct.has(product.id) || criticalByProduct.has(product.id)) row.criticalProductCount += 1
+    const lead = Number(product.leadTimeDays)
+    if (Number.isFinite(lead) && lead > 0) row.leadTimes.push(lead)
+    const duplicateSupplierCount = duplicateNames.get(product.name.trim().toLocaleLowerCase('sq-AL'))?.size ?? 0
+    if (duplicateSupplierCount > 1) row.alternativePressure += 1
+    bySupplier.set(supplierName, row)
+  })
+
+  return [...bySupplier.entries()]
+    .map(([supplierName, row]) => {
+      const averageLeadTimeDays = row.leadTimes.length ? roundOne(mean(row.leadTimes)) : null
+      const score = clamp(
+        Math.round(
+          row.shortageCount * 7 +
+            row.urgentCount * 12 +
+            row.criticalProductCount * 15 +
+            (averageLeadTimeDays != null ? averageLeadTimeDays * 4 : 4) +
+            row.alternativePressure * 5
+        ),
+        0,
+        100
+      )
+      const riskLevel = toRiskLevel(score)
+      const label: AiSupplierScorecard['label'] = score >= 70 ? 'REVIEW' : score >= 45 ? 'WATCH' : 'STABLE'
+      const reasonParts: string[] = []
+      if (row.shortageCount > 0) reasonParts.push(`${row.shortageCount} sinjale mungese`)
+      if (row.urgentCount > 0) reasonParts.push(`${row.urgentCount} urgjente`)
+      if (row.criticalProductCount > 0) reasonParts.push(`${row.criticalProductCount} produkte kritike`)
+      if (averageLeadTimeDays != null) reasonParts.push(`lead ${averageLeadTimeDays}d`)
+      if (row.alternativePressure > 0) reasonParts.push(`${row.alternativePressure} alternativa ne treg`)
+      const action =
+        label === 'REVIEW'
+          ? 'Rishiko marreveshjen, lead time ose furnitor alternativ.'
+          : label === 'WATCH'
+            ? 'Mbaje ne vezhgim dhe krahaso alternativat per produktet kritike.'
+            : 'Furnitor stabil per ritmin aktual.'
+      return {
+        supplierName,
+        score,
+        riskLevel,
+        shortageCount: row.shortageCount,
+        urgentCount: row.urgentCount,
+        productCount: row.productCount,
+        criticalProductCount: row.criticalProductCount,
+        averageLeadTimeDays,
+        alternativePressure: row.alternativePressure,
+        label,
+        reason: reasonParts.slice(0, 4).join(', ') || 'pa sinjale te forta rreziku',
+        action,
+      }
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score
+      return b.shortageCount - a.shortageCount
+    })
+    .slice(0, 5)
+}
+
+function buildDataQualityAudit(input: {
+  products: ProductView[]
+  seriesByProduct: Map<string, number[]>
+  stockWarnings: AiStockEarlyWarning[]
+  deadStockAlerts: AiDeadStockAlert[]
+  supplierScorecards: AiSupplierScorecard[]
+}): AiDataQualityIssue[] {
+  const issues: AiDataQualityIssue[] = []
+  const pushIssue = (issue: AiDataQualityIssue): void => {
+    issues.push(issue)
+  }
+  const nameGroups = new Map<string, ProductView[]>()
+  input.products.forEach((product) => {
+    const key = normalizeQualityText(product.name)
+    if (!key) return
+    const rows = nameGroups.get(key) ?? []
+    rows.push(product)
+    nameGroups.set(key, rows)
+  })
+
+  input.products.forEach((product) => {
+    const series = input.seriesByProduct.get(product.id) ?? []
+    const totalSignals = sum(series)
+    const stock = Number(product.currentStock ?? 0)
+    const hasNoThreshold = Number(product.minStock ?? 0) <= 0 && Number(product.reorderPoint ?? 0) <= 0
+    const hasDemand = totalSignals > 0
+    const hasCriticalStockWarning = input.stockWarnings.some((row) => row.productId === product.id)
+
+    if (hasNoThreshold && (hasDemand || stock > 0)) {
+      pushIssue({
+        id: `threshold:${product.id}`,
+        category: 'CATALOG',
+        severity: hasDemand ? 'HIGH' : 'MEDIUM',
+        title: 'Prag ri-porosie mungon',
+        detail: hasDemand
+          ? `Ka ${totalSignals} sinjale mungese, por min stock dhe ROP jane 0.`
+          : 'Produkti ka stok, por nuk ka prag per monitorim automatik.',
+        productId: product.id,
+        productName: product.name,
+        supplierName: product.supplierName,
+        action: 'Vendos min stock / ROP ose apliko ROP AI.',
+      })
+    }
+
+    if (stock <= 0 && hasDemand) {
+      pushIssue({
+        id: `zero-demand:${product.id}`,
+        category: 'STOCK',
+        severity: 'HIGH',
+        title: 'Stok zero me kerkese aktive',
+        detail: `Produkti ka ${totalSignals} sinjale ne historik dhe stok aktual ${stock}.`,
+        productId: product.id,
+        productName: product.name,
+        supplierName: product.supplierName,
+        action: 'Kontrollo numerimin fizik dhe krijo porosi prioritare.',
+      })
+    }
+
+    if (stock > 0 && hasDemand && stock <= Math.max(1, Number(product.reorderPoint ?? 0)) && !hasCriticalStockWarning) {
+      pushIssue({
+        id: `quiet-low:${product.id}`,
+        category: 'STOCK',
+        severity: 'MEDIUM',
+        title: 'Stok afer pragut pa alarm te forte',
+        detail: `Stok ${stock}, ROP ${product.reorderPoint}, sinjale ${totalSignals}.`,
+        productId: product.id,
+        productName: product.name,
+        supplierName: product.supplierName,
+        action: 'Rishiko pragun dhe safety stock per kete produkt.',
+      })
+    }
+
+    if (!(product.aliases ?? []).length && normalizeQualityText(product.name).split(' ').length >= 2) {
+      pushIssue({
+        id: `aliases:${product.id}`,
+        category: 'CATALOG',
+        severity: 'LOW',
+        title: 'Produkti pa alias',
+        detail: 'Kerkimi dhe importi OCR jane me te sakta kur produkti ka emra alternative.',
+        productId: product.id,
+        productName: product.name,
+        supplierName: product.supplierName,
+        action: 'Shto alias per emrat qe perdor ekipa ose furnitori.',
+      })
+    }
+
+    if (product.unitPrice == null && hasDemand) {
+      pushIssue({
+        id: `price:${product.id}`,
+        category: 'PRICING',
+        severity: 'LOW',
+        title: 'Mungon cmimi per produkt aktiv',
+        detail: `Ka ${totalSignals} sinjale, por nuk ka cmim per llogaritje kostoje.`,
+        productId: product.id,
+        productName: product.name,
+        supplierName: product.supplierName,
+        action: 'Ploteso cmimin e fundit nga oferta/importi.',
+      })
+    }
+  })
+
+  nameGroups.forEach((rows, key) => {
+    const supplierCount = new Set(rows.map((row) => row.supplierName)).size
+    if (rows.length < 2 || supplierCount < 2) return
+    const totalSignals = rows.reduce((total, row) => total + sum(input.seriesByProduct.get(row.id) ?? []), 0)
+    const primary = rows.slice().sort((a, b) => Number(b.currentStock ?? 0) - Number(a.currentStock ?? 0))[0]
+    pushIssue({
+      id: `duplicate:${key}`,
+      category: 'DUPLICATE',
+      severity: totalSignals > 0 ? 'MEDIUM' : 'LOW',
+      title: 'Duplikat i mundshem ne katalog',
+      detail: `"${primary.name}" gjendet te ${supplierCount} furnitore; mund te duhet preferred supplier ose alias i perbashket.`,
+      productId: primary.id,
+      productName: primary.name,
+      supplierName: primary.supplierName,
+      action: 'Vendos preferred supplier ose pastro emrat/aliaset.',
+    })
+  })
+
+  input.deadStockAlerts.slice(0, 3).forEach((alert) => {
+    pushIssue({
+      id: `deadstock:${alert.productId}`,
+      category: 'STOCK',
+      severity: alert.riskLevel,
+      title: alert.label === 'DEAD_STOCK' ? 'Dead stock i mundshem' : 'Overstock i mundshem',
+      detail: alert.reason,
+      productId: alert.productId,
+      productName: alert.name,
+      supplierName: alert.supplierName,
+      action: alert.action,
+    })
+  })
+
+  input.supplierScorecards
+    .filter((supplier) => supplier.label === 'REVIEW')
+    .slice(0, 3)
+    .forEach((supplier) => {
+      pushIssue({
+        id: `supplier:${normalizeQualityText(supplier.supplierName)}`,
+        category: 'SUPPLIER',
+        severity: supplier.riskLevel,
+        title: 'Furnitor ne review',
+        detail: supplier.reason,
+        supplierName: supplier.supplierName,
+        action: supplier.action,
+      })
+    })
+
+  const seen = new Set<string>()
+  return issues
+    .filter((issue) => {
+      if (seen.has(issue.id)) return false
+      seen.add(issue.id)
+      return true
+    })
+    .sort((a, b) => {
+      const rankDiff = qualityIssueRank(b) - qualityIssueRank(a)
+      if (rankDiff !== 0) return rankDiff
+      return a.title.localeCompare(b.title, 'sq-AL')
+    })
+    .slice(0, 8)
+}
+
+function buildAiExplanations(input: {
+  ai: AiOverview
+  stockWarnings: AiStockEarlyWarning[]
+  supplierScorecards: AiSupplierScorecard[]
+  abcXyzProducts: AiAbcXyzProduct[]
+  dataQualityIssues: AiDataQualityIssue[]
+}): AiDecisionExplanation[] {
+  const explanations: AiDecisionExplanation[] = []
+
+  input.stockWarnings.slice(0, 3).forEach((item) => {
+    const confidence = clamp(
+      Math.round(
+        45 +
+          Math.min(25, item.forecastNext7Days * 3) +
+          (item.serviceLevel === 'CRITICAL' ? 12 : item.serviceLevel === 'HIGH' ? 8 : 4) +
+          (item.daysLeft != null && item.daysLeft <= item.leadTimeDays + 2 ? 12 : 0)
+      ),
+      35,
+      96
+    )
+    explanations.push({
+      id: `safety:${item.productId}`,
+      subject: item.name,
+      decision: item.dynamicReorderPoint !== item.reorderPoint
+        ? `ROP AI ${item.dynamicReorderPoint} dhe porosi e sugjeruar ${item.recommendedQty}`
+        : `Mbaj ROP ${item.reorderPoint}; porosi e sugjeruar ${item.recommendedQty}`,
+      technique: 'SAFETY_STOCK',
+      confidence,
+      riskLevel: item.riskLevel,
+      factors: [
+        `Stok aktual ${item.currentStock}`,
+        `ROP aktual ${item.reorderPoint}`,
+        `Lead time ${item.leadTimeDays} dite`,
+        `Safety stock ${item.safetyStock}`,
+        item.daysLeft != null ? `Mbulim rreth ${item.daysLeft} dite` : 'Mbulimi ditor i paqarte',
+      ],
+      formula: 'ROP dinamik = kerkesa gjate lead time + safety stock; safety stock perdor variabilitetin dhe service level.',
+      sensitivity: 'Ndryshon nese lead time, ritmi i mungesave, stoku fizik ose urgjencat e fundit ndryshojne.',
+    })
+  })
+
+  input.ai.topRiskProducts.slice(0, 2).forEach((item) => {
+    explanations.push({
+      id: `forecast:${item.productId}`,
+      subject: item.name,
+      decision: `Prioritet ri-porosie me sasi ${item.recommendedQty}`,
+      technique: 'FORECAST',
+      confidence: item.confidence,
+      riskLevel: item.riskLevel,
+      factors: [
+        `Parashikim 7 dite: ${item.forecastNext7Days}`,
+        `Risk score ${item.riskScore}`,
+        `Anomaly score ${item.anomalyScore}`,
+        `Furnitor: ${item.supplierName}`,
+      ],
+      formula: 'Forecast kombinon mesataren e fundit, trendin 7/14 ditor, volatilitetin dhe sinjalet urgjente.',
+      sensitivity: 'Ndryshon me mungesa te reja, anulime, korrigjim sasie ose ndryshim te ritmit javor.',
+    })
+  })
+
+  input.abcXyzProducts.slice(0, 2).forEach((item) => {
+    explanations.push({
+      id: `abcxyz:${item.productId}`,
+      subject: item.name,
+      decision: `Klasifikim ${item.combinedClass}`,
+      technique: 'ABC_XYZ',
+      confidence: clamp(Math.round(52 + Math.min(30, item.totalSignals * 3) - Math.min(12, item.variability * 4)), 35, 92),
+      riskLevel: item.riskLevel,
+      factors: [
+        `ABC ${item.abcClass}: pesha/frekuenca e sinjaleve`,
+        `XYZ ${item.xyzClass}: variabilitet ${item.variability}`,
+        `${item.totalSignals} sinjale historike`,
+        `Furnitor: ${item.supplierName}`,
+      ],
+      formula: 'ABC bazohet ne kontributin kumulativ te sinjaleve; XYZ bazohet ne koeficientin e variacionit.',
+      sensitivity: 'Ndryshon kur shtohen sinjale te reja ose kerkesa behet me e qendrueshme/me e paparashikueshme.',
+    })
+  })
+
+  input.supplierScorecards.slice(0, 2).forEach((item) => {
+    explanations.push({
+      id: `supplier:${normalizeQualityText(item.supplierName)}`,
+      subject: item.supplierName,
+      decision: `Status furnitori: ${item.label}`,
+      technique: 'SUPPLIER_SCORE',
+      confidence: clamp(Math.round(45 + Math.min(25, item.productCount * 3) + Math.min(20, item.shortageCount * 2)), 35, 90),
+      riskLevel: item.riskLevel,
+      factors: [
+        `${item.shortageCount} mungesa`,
+        `${item.urgentCount} urgjente`,
+        `${item.criticalProductCount} produkte kritike`,
+        item.averageLeadTimeDays != null ? `Lead time mesatar ${item.averageLeadTimeDays} dite` : 'Lead time i paplotesuar',
+      ],
+      formula: 'Supplier score peshon mungesat, urgjencat, produktet kritike, lead time dhe presionin nga alternativat.',
+      sensitivity: 'Ndryshon nese permiresohet lead time, ulen urgjencat ose caktohen furnitore alternative.',
+    })
+  })
+
+  input.dataQualityIssues.slice(0, 2).forEach((item) => {
+    explanations.push({
+      id: `quality:${item.id}`,
+      subject: item.productName ?? item.supplierName ?? item.title,
+      decision: item.title,
+      technique: 'DATA_QUALITY',
+      confidence: item.severity === 'HIGH' ? 88 : item.severity === 'MEDIUM' ? 72 : 58,
+      riskLevel: item.severity,
+      factors: [
+        `Kategoria: ${item.category}`,
+        item.detail,
+        item.productName ? `Produkt: ${item.productName}` : item.supplierName ? `Furnitor: ${item.supplierName}` : 'Audit i pergjithshem',
+      ],
+      formula: 'Audit-i perdor rregulla deterministike mbi pragje, stok, duplikate, metadata, cmime dhe furnitore me risk.',
+      sensitivity: 'Ndryshon kur plotesohen te dhenat, pastrohen duplikatet ose korrigjohet stoku/pragu.',
+    })
+  })
+
+  return explanations
+    .sort((a, b) => {
+      const riskDiff = riskRank(b.riskLevel) - riskRank(a.riskLevel)
+      if (riskDiff !== 0) return riskDiff
+      return b.confidence - a.confidence
+    })
+    .slice(0, 6)
 }
 
 function buildOrderDetails(items: ShortageView[]): {
@@ -1486,6 +1970,38 @@ export async function getDashboardInsights(
         }
       })
     )
+    const stockSignals = buildStockSignals({
+      products,
+      analysisRange,
+      seriesByProduct,
+      urgentRecentByProduct: new Map(
+        shortages.filter((row) => row.urgent).map((row) => [row.productId, Number(row.addedCount ?? 1)])
+      ),
+    })
+    const abcXyzProducts = buildAbcXyzAnalysis({ products, seriesByProduct })
+    const supplierScorecards = buildSupplierScorecards({
+      products,
+      seriesByProduct,
+      urgentRecentByProduct: new Map(
+        shortages.filter((row) => row.urgent).map((row) => [row.productId, Number(row.addedCount ?? 1)])
+      ),
+      stockWarnings: stockSignals.stockWarnings,
+      abcXyzProducts,
+    })
+    const dataQualityIssues = buildDataQualityAudit({
+      products,
+      seriesByProduct,
+      stockWarnings: stockSignals.stockWarnings,
+      deadStockAlerts: stockSignals.deadStockAlerts,
+      supplierScorecards,
+    })
+    const explanations = buildAiExplanations({
+      ai,
+      stockWarnings: stockSignals.stockWarnings,
+      supplierScorecards,
+      abcXyzProducts,
+      dataQualityIssues,
+    })
     return {
       shortageTrend: emptyTrend,
       topSuppliers: [...supplierMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count })),
@@ -1493,14 +2009,11 @@ export async function getDashboardInsights(
       urgentBreakdown: { urgent, normal },
       weekdayTrend: weekdayLabels.map((day) => ({ day, count: weekdayMap.get(day) ?? 0 })),
       ai,
-      ...buildStockSignals({
-        products,
-        analysisRange,
-        seriesByProduct,
-        urgentRecentByProduct: new Map(
-          shortages.filter((row) => row.urgent).map((row) => [row.productId, Number(row.addedCount ?? 1)])
-        ),
-      }),
+      ...stockSignals,
+      supplierScorecards,
+      abcXyzProducts,
+      dataQualityIssues,
+      explanations,
     }
   }
   const companyId = await resolveCurrentCompanyId()
@@ -1514,6 +2027,10 @@ export async function getDashboardInsights(
       ai: emptyAiOverview(),
       stockWarnings: [],
       deadStockAlerts: [],
+      supplierScorecards: [],
+      abcXyzProducts: [],
+      dataQualityIssues: [],
+      explanations: [],
     }
   }
 
@@ -1606,6 +2123,21 @@ export async function getDashboardInsights(
     seriesByProduct,
     urgentRecentByProduct,
   })
+  const abcXyzProducts = buildAbcXyzAnalysis({ products, seriesByProduct })
+  const supplierScorecards = buildSupplierScorecards({
+    products,
+    seriesByProduct,
+    urgentRecentByProduct,
+    stockWarnings: stockSignals.stockWarnings,
+    abcXyzProducts,
+  })
+  const dataQualityIssues = buildDataQualityAudit({
+    products,
+    seriesByProduct,
+    stockWarnings: stockSignals.stockWarnings,
+    deadStockAlerts: stockSignals.deadStockAlerts,
+    supplierScorecards,
+  })
   const ai = buildAiOverview(
     [...seriesByProduct.entries()].map(([productId, dailySeries]) => {
       const product = productById.get(productId)
@@ -1620,6 +2152,13 @@ export async function getDashboardInsights(
       }
     })
   )
+  const explanations = buildAiExplanations({
+    ai,
+    stockWarnings: stockSignals.stockWarnings,
+    supplierScorecards,
+    abcXyzProducts,
+    dataQualityIssues,
+  })
   return {
     shortageTrend: dateRange.map((date) => ({ date, count: byDay.get(date) ?? 0 })),
     topSuppliers: [...bySupplier.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count })),
@@ -1628,6 +2167,10 @@ export async function getDashboardInsights(
     weekdayTrend: weekdayLabels.map((day) => ({ day, count: weekdayMap.get(day) ?? 0 })),
     ai,
     ...stockSignals,
+    supplierScorecards,
+    abcXyzProducts,
+    dataQualityIssues,
+    explanations,
   }
 }
 
@@ -2310,7 +2853,7 @@ export async function getRecentOrders(limit = 100): Promise<OwnerOrder[]> {
     const items = orderItems.map((it: any) => {
       const qty = Number(it.final_qty ?? it.suggested_qty ?? 1)
       const productName = it.products?.name ?? 'Produkt'
-      return `${qty} × ${productName}`
+      return `${qty} x ${productName}`
     })
     const dbId = String(row.id)
     const rawStatus = String(row.status ?? '').toUpperCase()
@@ -2331,7 +2874,7 @@ export async function markOrderAsSent(order: OwnerOrder): Promise<OwnerOrder> {
     return { ...order, status: 'SENT' }
   }
   if (!order.dbId) {
-    throw new Error('Porosia nuk ka ID nga baza — nuk mund të ruhet statusi.')
+    throw new Error('Porosia nuk ka ID nga baza - nuk mund te ruhet statusi.')
   }
 
   const companyId = await resolveCurrentCompanyId()
@@ -2352,7 +2895,7 @@ export async function markOrderAsSent(order: OwnerOrder): Promise<OwnerOrder> {
     /mark_order_sent|function .* does not exist|Could not find the function/i.test(msg)
 
   if (!rpcMissing) {
-    throw new Error(msg || 'Shënimi si dërguar dështoi.')
+    throw new Error(msg || 'Shenimi si derguar deshtoi.')
   }
 
   const { data, error } = await supabase
@@ -2365,8 +2908,143 @@ export async function markOrderAsSent(order: OwnerOrder): Promise<OwnerOrder> {
   if (error) throw error
   if (!data?.id) {
     throw new Error(
-      'Asnjë rresht nuk u përditësua. Ekzekuto migrimin mark_order_sent në Supabase dhe kontrollo që profili yt është OWNER.'
+      'Asnje rresht nuk u perditesua. Ekzekuto migrimin mark_order_sent ne Supabase dhe kontrollo qe profili yt eshte OWNER.'
     )
   }
   return { ...order, status: 'SENT' }
+}
+
+export async function recordShortageHistory(input: {
+  productId: string
+  shortageQty: number
+  urgencyLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+  urgencyScore: number
+  notes?: string
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!isSupabaseConfigured) return { ok: true }
+
+  const companyId = await resolveCurrentCompanyId()
+  if (!companyId) return { ok: false, message: 'Company mungon.' }
+
+  const { error } = await supabase.from('shortage_history').insert({
+    company_id: companyId,
+    product_id: input.productId,
+    shortage_date: todayIso(),
+    source: 'worker_entry',
+    shortage_qty: Math.max(1, input.shortageQty),
+    fulfilled: false,
+    urgency_level: input.urgencyLevel,
+    urgency_score: input.urgencyScore,
+    notes: input.notes ?? '',
+    created_by: (await supabase.auth.getUser()).data.user?.id ?? null,
+  })
+
+  if (error) return { ok: false, message: error.message }
+  return { ok: true }
+}
+
+export async function getShortageHistory(productId: string): Promise<
+  Array<{
+    shortageDate: string
+    shortageQty: number
+    urgencyLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+    fulfilled: boolean
+  }>
+> {
+  if (!isSupabaseConfigured) return []
+
+  const companyId = await resolveCurrentCompanyId()
+  if (!companyId) return []
+
+  const { data, error } = await supabase.rpc('get_shortage_history', {
+    p_company_id: companyId,
+    p_product_id: productId,
+    p_days_back: 180,
+  })
+
+  if (error || !Array.isArray(data)) return []
+
+  return data.map((row: any) => ({
+    shortageDate: String(row.shortage_date ?? ''),
+    shortageQty: Number(row.shortage_qty ?? 1),
+    urgencyLevel: String(row.urgency_level ?? 'LOW') as 'LOW' | 'MEDIUM' | 'HIGH',
+    fulfilled: Boolean(row.fulfilled),
+  }))
+}
+
+export async function recordSupplierPerformance(input: {
+  supplierId: string
+  productId: string
+  actualLeadTimeDays?: number
+  expectedLeadTimeDays?: number
+  onTimeDelivery?: boolean
+  orderedQty?: number
+  receivedQty?: number
+  unitPrice?: number
+  hasCert?: boolean
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!isSupabaseConfigured) return { ok: true }
+
+  const companyId = await resolveCurrentCompanyId()
+  if (!companyId) return { ok: false, message: 'Company mungon.' }
+
+  const { error } = await supabase.from('supplier_performance').insert({
+    company_id: companyId,
+    supplier_id: input.supplierId,
+    product_id: input.productId,
+    actual_lead_time_days: input.actualLeadTimeDays ?? null,
+    expected_lead_time_days: input.expectedLeadTimeDays ?? 3,
+    on_time_delivery: input.onTimeDelivery ?? true,
+    ordered_qty: input.orderedQty ?? null,
+    received_qty: input.receivedQty ?? null,
+    unit_price: input.unitPrice ?? null,
+    has_cert: input.hasCert ?? false,
+  })
+
+  if (error) return { ok: false, message: error.message }
+  return { ok: true }
+}
+
+export async function getSupplierMetrics(supplierId: string): Promise<{
+  avgLeadTime: number | null
+  onTimePercent: number | null
+  priceVarianceAvg: number | null
+  totalOrders: number
+}> {
+  if (!isSupabaseConfigured)
+    return { avgLeadTime: null, onTimePercent: null, priceVarianceAvg: null, totalOrders: 0 }
+
+  const companyId = await resolveCurrentCompanyId()
+  if (!companyId) return { avgLeadTime: null, onTimePercent: null, priceVarianceAvg: null, totalOrders: 0 }
+
+  const { data, error } = await supabase.rpc('get_supplier_metrics', {
+    p_company_id: companyId,
+    p_supplier_id: supplierId,
+    p_days_back: 180,
+  })
+
+  if (error || !Array.isArray(data) || !data[0]) {
+    return { avgLeadTime: null, onTimePercent: null, priceVarianceAvg: null, totalOrders: 0 }
+  }
+
+  const row = data[0] as any
+  return {
+    avgLeadTime: row.avg_lead_time ? Number(row.avg_lead_time) : null,
+    onTimePercent: row.on_time_percent ? Number(row.on_time_percent) : null,
+    priceVarianceAvg: row.price_variance_avg ? Number(row.price_variance_avg) : null,
+    totalOrders: Number(row.total_orders ?? 0),
+  }
+}
+
+export async function cleanOldShortageHistory(): Promise<{ deletedCount: number }> {
+  if (!isSupabaseConfigured) return { deletedCount: 0 }
+
+  const companyId = await resolveCurrentCompanyId()
+  if (!companyId) return { deletedCount: 0 }
+
+  const { data, error } = await supabase.rpc('archive_and_clean_old_data')
+
+  if (error || !Array.isArray(data) || !data[0]) return { deletedCount: 0 }
+
+  return { deletedCount: Number(data[0].shortage_records_deleted ?? 0) }
 }
