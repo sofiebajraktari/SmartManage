@@ -301,6 +301,70 @@ function roundMoney(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+function serviceFactor(level: AiSafetyStockPlan['serviceLevel']): number {
+  if (level === 'CRITICAL') return 2.05
+  if (level === 'HIGH') return 1.65
+  return 1.28
+}
+
+export function calculateDynamicSafetyStock(input: AiSafetyStockInput): AiSafetyStockPlan {
+  const series = input.dailySeries.map((value) => Math.max(0, Number(value) || 0))
+  const recent = series.slice(-28)
+  const recent14 = recent.slice(-14)
+  const activeSeries = recent14.length >= 7 ? recent14 : recent.length ? recent : [0]
+  const averageDailyDemand = roundOne(weightedMean(activeSeries))
+  const demandStdDev = roundOne(stdDev(activeSeries))
+  const leadTimeDays = clamp(Math.round(Math.max(1, Number(input.leadTimeDays ?? 2))), 1, 30)
+  const nonZeroCoverage = activeSeries.filter((value) => value > 0).length / Math.max(activeSeries.length, 1)
+  const serviceLevel: AiSafetyStockPlan['serviceLevel'] =
+    input.serviceLevel ?? (input.urgentNow ? 'CRITICAL' : nonZeroCoverage >= 0.45 ? 'HIGH' : 'STANDARD')
+  const z = serviceFactor(serviceLevel)
+  const leadDemand = Math.ceil(averageDailyDemand * leadTimeDays)
+  const variabilityBuffer = Math.ceil(z * demandStdDev * Math.sqrt(leadTimeDays))
+  const sparseDemandBuffer = nonZeroCoverage > 0 && nonZeroCoverage < 0.2 ? 1 : 0
+  const urgentBuffer = input.urgentNow ? 1 : 0
+  const safetyStock = clamp(variabilityBuffer + sparseDemandBuffer + urgentBuffer, 0, 999)
+  const dynamicReorderPoint = clamp(Math.max(1, leadDemand + safetyStock), 1, 999)
+  const currentThreshold = Math.max(0, Number(input.currentReorderPoint ?? 0), Number(input.currentMinStock ?? 0))
+  const reorderPointDelta = dynamicReorderPoint - currentThreshold
+  const confidence = clamp(
+    Math.round(42 + nonZeroCoverage * 28 + Math.min(sum(activeSeries), 20) * 1.1 - demandStdDev * 4),
+    35,
+    94
+  )
+  const riskScore = clamp(
+    Math.round(
+      Math.max(0, reorderPointDelta) * 8 +
+        averageDailyDemand * 12 +
+        demandStdDev * 10 +
+        (input.urgentNow ? 18 : 0) +
+        (serviceLevel === 'CRITICAL' ? 8 : serviceLevel === 'HIGH' ? 4 : 0)
+    ),
+    5,
+    99
+  )
+  const reasonParts: string[] = []
+  if (averageDailyDemand > 0) reasonParts.push(`kerkese mesatare ${averageDailyDemand}/dite`)
+  if (demandStdDev >= 0.8) reasonParts.push('variabilitet i larte')
+  if (leadTimeDays > 2) reasonParts.push(`lead time ${leadTimeDays} dite`)
+  if (input.urgentNow) reasonParts.push('sinjal urgjent aktiv')
+  if (!reasonParts.length) reasonParts.push('pak histori, prag konservativ')
+
+  return {
+    averageDailyDemand,
+    demandStdDev,
+    leadTimeDays,
+    serviceLevel,
+    serviceFactor: z,
+    safetyStock,
+    dynamicReorderPoint,
+    reorderPointDelta,
+    confidence,
+    riskLevel: toRiskLevel(riskScore),
+    reason: reasonParts.slice(0, 3).join(', '),
+  }
+}
+
 export function optimizeReorderPlan(input: AiReorderPlanInput): AiReorderPlan {
   const suggestedQty = Math.max(1, Math.round(Number(input.suggestedQty ?? 1)))
   const derivedForecastPerDay = Math.max(
@@ -649,4 +713,252 @@ export function recommendAlternativeSuppliers(input: {
     })
     .slice(0, limit)
   return ranked
+}
+
+// ============ NEW SEASONAL & TREND ANALYSIS FUNCTIONS ============
+
+/**
+ * Analiza seasonal - shikon nëse ka pattern sezonal në demand
+ * Bazuar në data ditor dhe hetohet pattern përjavë, pernajave
+ */
+export function analyzeSeasonalTrend(dailySeries: number[]): SeasonalTrendAnalysis {
+  const series = dailySeries.map((v) => Math.max(0, Number(v) || 0))
+  if (series.length < 7) {
+    return {
+      hasSeasonal: false,
+      seasonalScore: 0,
+      peakDays: [],
+      lowDays: [],
+      trendDirection: 'STABLE',
+      volatilityIndex: stdDev(series) / Math.max(mean(series), 1),
+    }
+  }
+
+  // Analiza përjavore (7 ditë pattern)
+  const dayOfWeekData: Record<number, number[]> = {}
+  for (let i = 0; i < series.length; i++) {
+    const dayOfWeek = i % 7
+    if (!dayOfWeekData[dayOfWeek]) dayOfWeekData[dayOfWeek] = []
+    dayOfWeekData[dayOfWeek].push(series[i])
+  }
+
+  const dayAverages = Object.entries(dayOfWeekData)
+    .map(([day, values]) => ({
+      dayOfWeek: Number(day),
+      avg: mean(values),
+    }))
+    .sort((a, b) => b.avg - a.avg)
+
+  const peakDays = dayAverages.slice(0, 2).map((d) => d.dayOfWeek)
+  const lowDays = dayAverages.slice(-2).map((d) => d.dayOfWeek)
+
+  // Seasonal score: mesatarja e variancës përjavore vs total variance
+  const betweenGroupVar = mean(
+    Object.values(dayOfWeekData).map((values) => {
+      const groupMean = mean(values)
+      const globalMean = mean(series)
+      return Math.pow(groupMean - globalMean, 2) * values.length
+    })
+  )
+  const totalVar = Math.pow(stdDev(series), 2)
+  const seasonalScore = totalVar > 0 ? clamp(Math.round((betweenGroupVar / totalVar) * 100), 0, 100) : 0
+
+  // Trend direction
+  const recent = series.slice(-14)
+  const previous = series.slice(-28, -14)
+  const recentAvg = mean(recent)
+  const previousAvg = mean(previous)
+  const trendDirection = recentAvg > previousAvg * 1.1 ? 'UP' : previousAvg > recentAvg * 1.1 ? 'DOWN' : 'STABLE'
+
+  return {
+    hasSeasonal: seasonalScore >= 35,
+    seasonalScore,
+    peakDays,
+    lowDays,
+    trendDirection,
+    volatilityIndex: stdDev(series) / Math.max(mean(series), 1),
+  }
+}
+
+/**
+ * Analiza pattern i demand - detektim i tipeve të ndryshme
+ */
+export function identifyDemandPattern(dailySeries: number[]): DemandPatternType {
+  const series = dailySeries.map((v) => Math.max(0, Number(v) || 0))
+  if (series.length < 7) {
+    return {
+      type: 'STEADY',
+      confidence: 40,
+      description: 'Pak data për analiza',
+    }
+  }
+
+  const recent14 = series.slice(-14)
+  const previous7 = series.slice(-14, -7)
+  const recentAvg = mean(recent14)
+  const previousAvg = mean(previous7)
+
+  // Variance metrics
+  const volatility = stdDev(recent14) / Math.max(recentAvg, 1)
+  const zeroCount = recent14.filter((v) => v === 0).length
+  const isSporadic = zeroCount > 4 && zeroCount < 10
+
+  // Trend
+  const trendRatio = previousAvg > 0 ? recentAvg / previousAvg : 1
+  const isUpTrend = trendRatio >= 1.2
+  const isDownTrend = previousAvg > 0 && trendRatio <= 0.8
+
+  // Cycle detection - shiko nëse ka pattern të përsëritur
+  let isCyclical = false
+  if (series.length >= 28) {
+    const last28 = series.slice(-28)
+    const pattern1 = mean(last28.slice(0, 14))
+    const pattern2 = mean(last28.slice(14, 28))
+    isCyclical = Math.abs(pattern1 - pattern2) < stdDev(last28) * 0.5
+  }
+
+  let type: DemandPatternType['type'] = 'STEADY'
+  let confidence = 65
+  let description = 'Demand stabil'
+
+  if (isSporadic) {
+    type = 'SPORADIC'
+    confidence = 75
+    description = 'Perioda me mungesa dhe perioda pa kërkesë'
+  } else if (isUpTrend) {
+    type = 'TRENDING_UP'
+    confidence = 70
+    description = `Trend në rritje - +${Math.round((trendRatio - 1) * 100)}%`
+  } else if (isDownTrend) {
+    type = 'TRENDING_DOWN'
+    confidence = 70
+    description = `Trend në rënie - ${Math.round((1 - trendRatio) * 100)}%`
+  } else if (isCyclical) {
+    type = 'CYCLICAL'
+    confidence = 60
+    description = 'Perioda të përsëritura të demand'
+  } else if (volatility > 0.7) {
+    type = 'SEASONAL'
+    confidence = analyzeSeasonalTrend(series).seasonalScore
+    description = 'Variacione të ndjeshme, mundësisht sezonale'
+  }
+
+  return { type, confidence: clamp(confidence, 30, 95), description }
+}
+
+/**
+ * Llogarit price trend analysis bazuar në historical prices
+ */
+export function analyzePriceTrend(prices: number[]): PriceTrendAnalysis {
+  const validPrices = prices.filter((p) => Number.isFinite(p) && p > 0)
+  if (validPrices.length === 0) {
+    return {
+      currentPrice: 0,
+      avgPrice30Days: 0,
+      priceChange7Days: 0,
+      priceChange30Days: 0,
+      trendDirection: 'STABLE',
+      volatility: 0,
+      expectedPriceIn7Days: 0,
+      seasonalPriceAdjustment: 0,
+    }
+  }
+
+  const currentPrice = validPrices[validPrices.length - 1]
+  const last30 = validPrices.slice(-30)
+  const last7 = validPrices.slice(-7)
+
+  const avgPrice30Days = mean(last30)
+  const avgPrice7Days = mean(last7)
+  const priceChange7Days = avgPrice7Days > 0 ? ((currentPrice - avgPrice7Days) / avgPrice7Days) * 100 : 0
+  const priceChange30Days = avgPrice30Days > 0 ? ((currentPrice - avgPrice30Days) / avgPrice30Days) * 100 : 0
+
+  const volatility = stdDev(last30)
+  const trendDirection =
+    priceChange7Days > 2.5 ? 'UP' : priceChange7Days < -2.5 ? 'DOWN' : 'STABLE'
+
+  // Forecast për 7 ditë
+  const direction = priceChange7Days > 0 ? 1 : priceChange7Days < 0 ? -1 : 0
+  const expectedPriceIn7Days = currentPrice + (Math.abs(priceChange7Days) / 100) * currentPrice * direction * 0.5
+
+  return {
+    currentPrice,
+    avgPrice30Days: roundMoney(avgPrice30Days),
+    priceChange7Days: Math.round(priceChange7Days * 100) / 100,
+    priceChange30Days: Math.round(priceChange30Days * 100) / 100,
+    trendDirection,
+    volatility: roundMoney(volatility),
+    expectedPriceIn7Days: roundMoney(expectedPriceIn7Days),
+    seasonalPriceAdjustment: 0,
+  }
+}
+
+/**
+ * Predikon lead time bazuar në historical data
+ */
+export function predictLeadTime(leadTimes: number[]): LeadTimePrediction {
+  const validLeadTimes = leadTimes.filter((lt) => Number.isFinite(lt) && lt > 0)
+  if (validLeadTimes.length === 0) {
+    return {
+      expectedDays: 2,
+      confidenceLevel: 30,
+      minDays: 1,
+      maxDays: 5,
+      seasonalAdjustment: 0,
+      supplierHistoryLength: 0,
+    }
+  }
+
+  const avgLeadTime = mean(validLeadTimes)
+  const stdDevLeadTime = stdDev(validLeadTimes)
+  const minDays = Math.max(1, Math.floor(Math.min(...validLeadTimes)))
+  const maxDays = Math.ceil(Math.max(...validLeadTimes))
+
+  // Confidence: më i lartë nëse ka shumë data dhe variabilitet i ulët
+  let confidenceLevel = 50
+  if (validLeadTimes.length >= 10) confidenceLevel += 20
+  else if (validLeadTimes.length >= 5) confidenceLevel += 10
+
+  if (stdDevLeadTime < avgLeadTime * 0.3) confidenceLevel += 15
+  else if (stdDevLeadTime > avgLeadTime * 0.6) confidenceLevel -= 10
+
+  return {
+    expectedDays: Math.round(avgLeadTime),
+    confidenceLevel: clamp(confidenceLevel, 25, 95),
+    minDays,
+    maxDays,
+    seasonalAdjustment: 0,
+    supplierHistoryLength: validLeadTimes.length,
+  }
+}
+
+/**
+ * Llogarit metrics e reliability të furnitorit
+ * (këto duhet të arrihen nga data layer kur disponohen)
+ */
+export function calculateSupplierReliability(input: {
+  onTimeOrderCount: number
+  totalOrderCount: number
+  avgLeadTime: number
+  leadTimeVariance: number
+  accurateOrders: number
+  priceStability: number
+}): SupplierReliabilityMetrics {
+  const onTimeRate = input.totalOrderCount > 0 ? (input.onTimeOrderCount / input.totalOrderCount) * 100 : 0
+  const orderAccuracyRate = input.totalOrderCount > 0 ? (input.accurateOrders / input.totalOrderCount) * 100 : 0
+
+  const reliabilityScore = Math.round(
+    onTimeRate * 0.4 + orderAccuracyRate * 0.3 + (input.priceStability * 0.2) + (100 - Math.min(input.leadTimeVariance * 10, 50)) * 0.1
+  )
+
+  return {
+    supplierName: '',
+    onTimeDeliveryRate: clamp(onTimeRate, 0, 100),
+    averageLeadTime: input.avgLeadTime,
+    leadTimeVariance: input.leadTimeVariance,
+    orderAccuracyRate: clamp(orderAccuracyRate, 0, 100),
+    responseTime: 24, // placeholder
+    priceStability: clamp(input.priceStability, 0, 100),
+    minimumReliabilityScore: clamp(reliabilityScore, 0, 100),
+  }
 }
