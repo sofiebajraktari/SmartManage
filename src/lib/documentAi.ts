@@ -1,10 +1,18 @@
 export type TextUrgencyLevel = 'LOW' | 'MEDIUM' | 'HIGH'
+export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH'
+export type ProcessingMethod = 'REGEX' | 'OPENAI' | 'HYBRID'
+
+// Import AI clients
+import { analyzeShortageWithAI } from './openaiClient.js'
+import { isSupabaseConfigured } from './supabase.js'
 
 export interface TextUrgencyPrediction {
   score: number
   level: TextUrgencyLevel
   shouldMarkUrgent: boolean
   reasons: string[]
+  confidence: number
+  method?: ProcessingMethod
 }
 
 export interface NaturalLanguageShortageInterpretation {
