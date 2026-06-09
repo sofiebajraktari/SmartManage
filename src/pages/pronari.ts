@@ -1306,11 +1306,14 @@ export function renderPronari(
 
   type ProductAiInsight = {
     productId: string
+    targetProductId?: string
     severity: 'HIGH' | 'MEDIUM' | 'LOW'
     score: number
     title: string
     detail: string
     action: string
+    ctaLabel: string
+    ctaAction: 'adjust-stock' | 'set-preferred-product' | 'open-shortages' | 'edit-product'
   }
 
   function getProductAiInsights(limit = products.length): ProductAiInsight[] {
@@ -1355,12 +1358,15 @@ export function renderPronari(
             title: shortage.urgent ? 'Mungese urgjente aktive' : 'Mungese aktive sot',
             detail: shortage.aiReason || `Stok ${product.currentStock}, prag ${stockThreshold}.`,
             action: qty ? `Ri-porosit rreth ${qty} njesi.` : 'Kaloje ne porosi sot.',
+            ctaLabel: 'Shiko mungesat',
+            ctaAction: 'open-shortages',
           }
         }
 
         if (stockStatus === 'out') {
           return {
             productId: product.id,
+            targetProductId: topAlternative?.productId,
             severity,
             score,
             title: 'Produkti eshte pa stok',
@@ -1368,6 +1374,8 @@ export function renderPronari(
             action: topAlternative
               ? `Kontrollo ${topAlternative.supplierName} (${formatAlternativeLabel(topAlternative.label)}).`
               : 'Rishiko porosine e radhes.',
+            ctaLabel: topAlternative ? 'Vendos alternative' : 'Korrigjo stokun',
+            ctaAction: topAlternative ? 'set-preferred-product' : 'adjust-stock',
           }
         }
 
@@ -1375,6 +1383,7 @@ export function renderPronari(
           const stockGap = Math.max(0, stockThreshold - product.currentStock)
           return {
             productId: product.id,
+            targetProductId: topAlternative?.productId,
             severity,
             score,
             title: 'Stoku eshte nen prag',
@@ -1382,11 +1391,14 @@ export function renderPronari(
             action: topAlternative
               ? `AI sugjeron ${topAlternative.supplierName} si alternative.`
               : 'Rishiko reorder point.',
+            ctaLabel: topAlternative ? 'Vendos alternative' : 'Rregullo pragun',
+            ctaAction: topAlternative ? 'set-preferred-product' : 'edit-product',
           }
         }
 
         return {
           productId: product.id,
+          targetProductId: topAlternative?.productId,
           severity,
           score,
           title: 'Ka furnitore alternative',
@@ -1396,6 +1408,8 @@ export function renderPronari(
           action: topAlternative
             ? `Vendos ${topAlternative.supplierName} ose preferencen e furnitorit.`
             : 'Vendos preferred supplier.',
+          ctaLabel: topAlternative ? 'Vendos preferred' : 'Hap produktin',
+          ctaAction: topAlternative ? 'set-preferred-product' : 'edit-product',
         }
       })
       .filter((row): row is ProductAiInsight => row !== null)
@@ -1486,7 +1500,19 @@ export function renderPronari(
                           </div>
                           <p class="mt-2 text-xs font-medium text-slate-700">${insight.title}</p>
                           <p class="mt-1 text-[11px] text-slate-500">${insight.detail}</p>
-                          <p class="mt-1 text-[11px] font-medium text-sky-700">${insight.action}</p>
+                          <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                            <p class="text-[11px] font-medium text-sky-700">${insight.action}</p>
+                            <button
+                              type="button"
+                              data-action="ai-product-action"
+                              data-ai-action="${insight.ctaAction}"
+                              data-product-id="${insight.productId}"
+                              data-target-product-id="${insight.targetProductId ?? ''}"
+                              class="rounded-lg border border-sky-200 bg-white px-2 py-1 text-[10px] font-semibold text-sky-700 hover:bg-sky-50"
+                            >
+                              ${insight.ctaLabel}
+                            </button>
+                          </div>
                         </li>
                       `
                     })
@@ -3098,6 +3124,15 @@ export function renderPronari(
         const thresholdLabel =
           item.reorderPoint > 0 ? `ROP ${item.reorderPoint}` : item.minStock > 0 ? `Min ${item.minStock}` : 'Pa prag'
         const daysLabel = item.daysLeft != null ? `~${item.daysLeft} dite stok` : `Lead ${item.leadTimeDays}d`
+        const dynamicDeltaLabel =
+          item.reorderPointDelta > 0
+            ? `+${item.reorderPointDelta} mbi prag`
+            : item.reorderPointDelta < 0
+              ? `${item.reorderPointDelta} nen prag`
+              : 'prag OK'
+        const serviceLabel =
+          item.serviceLevel === 'CRITICAL' ? 'kritik' : item.serviceLevel === 'HIGH' ? 'i larte' : 'standard'
+        const canApplyDynamicRop = item.dynamicReorderPoint > 0 && item.dynamicReorderPoint !== item.reorderPoint
         return `
           <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
             <div class="flex items-start justify-between gap-2">
@@ -3115,8 +3150,160 @@ export function renderPronari(
               <span>${daysLabel}</span>
               <span>AI ${item.recommendedQty}</span>
             </div>
+            <div class="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>Safety stock ${item.safetyStock}</span>
+              <span>ROP AI ${item.dynamicReorderPoint}</span>
+              <span>${dynamicDeltaLabel}</span>
+              <span>service ${serviceLabel}</span>
+            </div>
             <p class="mt-1 text-[10px] text-slate-500">${item.reason}</p>
+            <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <p class="text-[10px] text-indigo-700">${item.action}</p>
+              ${
+                canApplyDynamicRop
+                  ? `<button
+                      type="button"
+                      data-action="apply-ai-rop"
+                      data-product-id="${item.productId}"
+                      data-dynamic-rop="${item.dynamicReorderPoint}"
+                      class="rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-100"
+                    >Apliko ROP AI</button>`
+                  : ''
+              }
+            </div>
+          </li>`
+      })
+      .join('')
+    const supplierScoreRows = dashboardInsights.supplierScorecards
+      .map((item) => {
+        const badgeClass =
+          item.riskLevel === 'HIGH'
+            ? 'border-red-200 bg-red-50 text-red-700'
+            : item.riskLevel === 'MEDIUM'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+        const labelText = item.label === 'REVIEW' ? 'Review' : item.label === 'WATCH' ? 'Watch' : 'Stable'
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.supplierName}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.reason}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">${labelText} ${item.score}</span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>${item.productCount} produkte</span>
+              <span>${item.shortageCount} mungesa</span>
+              <span>${item.urgentCount} urgjente</span>
+              <span>${item.averageLeadTimeDays != null ? `Lead ${item.averageLeadTimeDays}d` : 'Lead n/a'}</span>
+            </div>
             <p class="mt-1 text-[10px] text-indigo-700">${item.action}</p>
+          </li>`
+      })
+      .join('')
+    const abcXyzRows = dashboardInsights.abcXyzProducts
+      .map((item) => {
+        const badgeClass =
+          item.riskLevel === 'HIGH'
+            ? 'border-red-200 bg-red-50 text-red-700'
+            : item.riskLevel === 'MEDIUM'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-slate-200 bg-slate-50 text-slate-700'
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.name}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.supplierName}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">${item.combinedClass}</span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>${item.totalSignals} sinjale</span>
+              <span>variabilitet ${item.variability}</span>
+            </div>
+            <p class="mt-1 text-[10px] text-indigo-700">${item.recommendedPolicy}</p>
+          </li>`
+      })
+      .join('')
+    const dataQualityRows = dashboardInsights.dataQualityIssues
+      .map((item) => {
+        const badgeClass =
+          item.severity === 'HIGH'
+            ? 'border-red-200 bg-red-50 text-red-700'
+            : item.severity === 'MEDIUM'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-slate-200 bg-slate-50 text-slate-700'
+        const categoryLabel =
+          item.category === 'CATALOG'
+            ? 'Katalog'
+            : item.category === 'STOCK'
+              ? 'Stok'
+              : item.category === 'SUPPLIER'
+                ? 'Furnitor'
+                : item.category === 'PRICING'
+                  ? 'Cmim'
+                  : 'Duplikat'
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.title}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.productName ?? item.supplierName ?? 'Audit i pergjithshem'}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">${categoryLabel}</span>
+            </div>
+            <p class="mt-1 text-[10px] text-slate-500">${item.detail}</p>
+            <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+              <p class="text-[10px] text-indigo-700">${item.action}</p>
+              ${
+                item.productId
+                  ? `<button
+                      type="button"
+                      data-action="ai-quality-fix"
+                      data-product-id="${item.productId}"
+                      class="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-semibold text-slate-700 hover:bg-white"
+                    >Hap produktin</button>`
+                  : ''
+              }
+            </div>
+          </li>`
+      })
+      .join('')
+    const explanationRows = dashboardInsights.explanations
+      .map((item) => {
+        const badgeClass =
+          item.riskLevel === 'HIGH'
+            ? 'border-red-200 bg-red-50 text-red-700'
+            : item.riskLevel === 'MEDIUM'
+              ? 'border-amber-200 bg-amber-50 text-amber-700'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+        const techniqueLabel =
+          item.technique === 'SAFETY_STOCK'
+            ? 'Safety stock'
+            : item.technique === 'ABC_XYZ'
+              ? 'ABC/XYZ'
+              : item.technique === 'SUPPLIER_SCORE'
+                ? 'Supplier score'
+                : item.technique === 'DATA_QUALITY'
+                  ? 'Data audit'
+                  : 'Forecast'
+        return `
+          <li class="rounded-lg border border-slate-200 bg-white px-3 py-2">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-xs font-semibold text-slate-800">${item.subject}</p>
+                <p class="truncate text-[10px] text-slate-500">${item.decision}</p>
+              </div>
+              <span class="rounded-full border px-2 py-0.5 text-[10px] font-semibold ${badgeClass}">${techniqueLabel}</span>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-slate-600">
+              <span>Besim ${item.confidence}%</span>
+              ${item.factors.slice(0, 4).map((factor) => `<span>${factor}</span>`).join('')}
+            </div>
+            <p class="mt-1 text-[10px] text-slate-500">${item.formula}</p>
+            <p class="mt-1 text-[10px] text-indigo-700">${item.sensitivity}</p>
           </li>`
       })
       .join('')
@@ -3263,9 +3450,29 @@ export function renderPronari(
             <ul class="space-y-1.5">${aiPriorityRows || '<li class="text-xs text-slate-500">AI ende nuk ka mjaft histori per te renditur produkte prioritare.</li>'}</ul>
           </div>
           <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">AI explainability: pse?</p>
+            <p class="mb-2 text-[10px] text-slate-500">Shpjegon vendimet kryesore me faktorët, tekniken, besimin dhe ndjeshmerine.</p>
+            <ul class="space-y-1.5">${explanationRows || '<li class="text-xs text-slate-500">Ende nuk ka rekomandime te mjaftueshme per shpjegim.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
             <p class="mb-2 text-xs font-semibold text-slate-700">AI early warning para mungeses</p>
             <p class="mb-2 text-[10px] text-slate-500">Bazuar ne stokun aktual, pragjet e ri-porosise dhe ritmin e mungesave.</p>
             <ul class="space-y-1.5">${stockWarningRows || '<li class="text-xs text-slate-500">Nuk ka produkte qe kerkojne nderhyrje te shpejte per momentin.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">AI supplier scorecard</p>
+            <p class="mb-2 text-[10px] text-slate-500">Vleresim i furnitoreve sipas mungesave, urgjencave, produkteve kritike dhe alternativave.</p>
+            <ul class="space-y-1.5">${supplierScoreRows || '<li class="text-xs text-slate-500">Nuk ka mjaft te dhena per scorecard furnitoresh.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">ABC/XYZ inventory analysis</p>
+            <p class="mb-2 text-[10px] text-slate-500">ABC mat rendesine/frekuencen; XYZ mat stabilitetin e kerkeses.</p>
+            <ul class="space-y-1.5">${abcXyzRows || '<li class="text-xs text-slate-500">Nuk ka histori te mjaftueshme per klasifikim ABC/XYZ.</li>'}</ul>
+          </div>
+          <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
+            <p class="mb-2 text-xs font-semibold text-slate-700">AI data quality audit</p>
+            <p class="mb-2 text-[10px] text-slate-500">Kontrollon pragje, duplikate, metadata, stok problematik dhe furnitore me risk.</p>
+            <ul class="space-y-1.5">${dataQualityRows || '<li class="text-xs text-slate-500">Audit-i nuk gjeti probleme te rendesishme ne te dhenat aktuale.</li>'}</ul>
           </div>
           <div class="rounded-xl border border-slate-200 bg-slate-50 p-3 xl:col-span-2">
             <p class="mb-2 text-xs font-semibold text-slate-700">AI dead stock / overstock</p>
@@ -5275,6 +5482,131 @@ export function renderPronari(
     const id = btn.dataset.id
     const productId = btn.dataset.productId
     const userId = btn.dataset.userId?.trim()
+
+    if (action === 'ai-quality-fix' && productId) {
+      const current = products.find((p) => p.id === productId)
+      if (!current) return
+      const edited = await openProductEditModal(current)
+      if (!edited) return
+      const result = await updateProduct({
+        id: current.id,
+        name: edited.name,
+        supplier: edited.supplier,
+        category: edited.category,
+        aliases: edited.aliases,
+        minStock: edited.minStock,
+        reorderPoint: edited.reorderPoint,
+      })
+      if (!result.ok) {
+        showToast(result.message)
+        return
+      }
+      products = await getProducts()
+      suppliers = await getSuppliers()
+      preferredProductByName = await getPreferredProductByName()
+      dashboardInsights = await getDashboardInsights(dashboardRangeDays, products)
+      refreshUI()
+      showToast('Audit AI: produkti u perditesua.')
+      return
+    }
+
+    if (action === 'apply-ai-rop' && productId) {
+      const current = products.find((p) => p.id === productId)
+      if (!current) return
+      const dynamicRop = Math.max(0, parseWholeNumberInput(String(btn.dataset.dynamicRop ?? ''), current.reorderPoint))
+      if (!dynamicRop || dynamicRop === current.reorderPoint) {
+        showToast('ROP AI eshte tashme i aplikuar.')
+        return
+      }
+      const result = await updateProduct({
+        id: current.id,
+        name: current.name,
+        supplier: current.supplierName,
+        category: current.category,
+        aliases: current.aliases,
+        minStock: current.minStock,
+        reorderPoint: dynamicRop,
+      })
+      if (!result.ok) {
+        showToast(result.message)
+        return
+      }
+      products = await getProducts()
+      dashboardInsights = await getDashboardInsights(dashboardRangeDays, products)
+      hasLoadedProducts = true
+      hasLoadedDashboardInsights = true
+      refreshUI()
+      showToast(`ROP AI u aplikua: ${current.name} -> ${dynamicRop}.`)
+      return
+    }
+
+    if (action === 'ai-product-action' && productId) {
+      const aiAction = btn.dataset.aiAction
+      const current = products.find((p) => p.id === productId)
+      if (!current) return
+
+      if (aiAction === 'open-shortages') {
+        window.location.hash = '#/pronari/mungesat'
+        return
+      }
+
+      if (aiAction === 'set-preferred-product') {
+        const targetProductId = String(btn.dataset.targetProductId ?? '').trim()
+        const preferredProduct = products.find((p) => p.id === targetProductId) ?? current
+        const result = await setPreferredProductByName(preferredProduct.name, preferredProduct.id, preferredProduct.supplierId)
+        if (!result.ok) {
+          showToast(result.message)
+          return
+        }
+        preferredProductByName = await getPreferredProductByName()
+        refreshUI()
+        showToast(`AI vendosi "${preferredProduct.supplierName}" si furnitor preferuar.`)
+        return
+      }
+
+      if (aiAction === 'adjust-stock') {
+        const movement = await openStockAdjustModal(current)
+        if (!movement) return
+        const result = await adjustProductStock({
+          productId: current.id,
+          quantityDelta: movement.quantityDelta,
+          note: movement.note,
+          movementType: movement.movementType,
+        })
+        if (!result.ok) {
+          showToast(result.message)
+          return
+        }
+        products = await getProducts()
+        refreshUI()
+        showToast('AI action: stoku u perditesua.')
+        return
+      }
+
+      if (aiAction === 'edit-product') {
+        const edited = await openProductEditModal(current)
+        if (!edited) return
+        const result = await updateProduct({
+          id: current.id,
+          name: edited.name,
+          supplier: edited.supplier,
+          category: edited.category,
+          aliases: edited.aliases,
+          minStock: edited.minStock,
+          reorderPoint: edited.reorderPoint,
+        })
+        if (!result.ok) {
+          showToast(result.message)
+          return
+        }
+        products = await getProducts()
+        suppliers = await getSuppliers()
+        preferredProductByName = await getPreferredProductByName()
+        refreshUI()
+        showToast('AI action: produkti u perditesua.')
+        return
+      }
+    }
 
     if (action === 'dashboard-range') {
       const nextDays = Number(btn.dataset.days)
