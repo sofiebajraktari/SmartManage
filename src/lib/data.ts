@@ -216,6 +216,10 @@ export interface DashboardInsights {
   ai: AiOverview
   stockWarnings: AiStockEarlyWarning[]
   deadStockAlerts: AiDeadStockAlert[]
+  supplierScorecards: AiSupplierScorecard[]
+  abcXyzProducts: AiAbcXyzProduct[]
+  dataQualityIssues: AiDataQualityIssue[]
+  explanations: AiDecisionExplanation[]
 }
 
 const COMPANY_ID_CACHE_TTL_MS = 60_000
