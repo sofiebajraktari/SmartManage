@@ -64,8 +64,8 @@ function renderAiCommandFeedback(input: {
         <span class="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-semibold text-sky-700">Produkt: ${input.interpretation.searchHint || '—'}</span>
         <span class="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 font-semibold text-slate-700">Sasi: ${input.interpretation.quantity}</span>
         ${
-          input.matchConfidence
-            ? `<span class="rounded-full border px-2 py-0.5 font-semibold ${input.matchConfidence.className}">Match ${input.matchConfidence.label}</span>`
+          matchConfidence
+            ? `<span class="rounded-full border px-2 py-0.5 font-semibold ${matchConfidence.className}">Match ${matchConfidence.label}</span>`
             : ''
         }
       </div>
@@ -374,6 +374,11 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
   const accountInitial = document.getElementById('worker-account-initial') as HTMLDivElement | null
   const accountName = document.getElementById('worker-account-name') as HTMLDivElement | null
   const accountRole = document.getElementById('worker-account-role') as HTMLDivElement | null
+  const aiCommandInput = document.getElementById('worker-ai-command') as HTMLInputElement | null
+  const aiInterpretBtn = document.getElementById('worker-ai-interpret') as HTMLButtonElement | null
+  const aiAddBtn = document.getElementById('worker-ai-add') as HTMLButtonElement | null
+  const aiFeedback = document.getElementById('worker-ai-feedback') as HTMLDivElement | null
+  const noteAi = document.getElementById('worker-note-ai') as HTMLDivElement | null
 
   const applyAccountInfo = (name: string, roleLabel: string): void => {
     if (accountName) accountName.textContent = name
@@ -459,6 +464,56 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
     showToast('Mungesa u shtua.')
   }
 
+  async function analyzeAiCommand(preferAI = false): Promise<{
+    interpretation: NaturalLanguageShortageInterpretation
+    match: ProductView | null
+    matchScore: number | null
+  } | null> {
+    const rawText = aiCommandInput?.value.trim() ?? ''
+    if (!rawText) {
+      showToast('Shkruaj nje tekst per AI Quick Entry.')
+      return null
+    }
+
+    const interpretation = preferAI
+      ? await interpretShortageHybrid(rawText, true)
+      : interpretShortageNaturalLanguage(rawText)
+    const matches = rankProductsForWorkerSearch(allProducts, interpretation.searchHint || rawText, 5)
+    const match = matches[0] ?? null
+    const matchScore = match ? workerProductSearchScore(match, interpretation.searchHint || rawText) : null
+    return { interpretation, match, matchScore }
+  }
+
+  async function previewAiCommand(preferAI = false): Promise<Awaited<ReturnType<typeof analyzeAiCommand>>> {
+    const analysis = await analyzeAiCommand(preferAI)
+    if (!analysis || !aiFeedback) return analysis
+    aiFeedback.innerHTML = renderAiCommandFeedback(analysis)
+
+    if (analysis.match) {
+      currentMatches = [analysis.match, ...rankProductsForWorkerSearch(allProducts, analysis.interpretation.searchHint, 8)]
+        .filter((product, index, rows) => rows.findIndex((row) => row.id === product.id) === index)
+        .slice(0, 8)
+      resultsDiv.innerHTML = renderResults(currentMatches)
+    }
+    return analysis
+  }
+
+  async function addFromAiCommand(): Promise<void> {
+    const analysis = await previewAiCommand(true)
+    if (!analysis?.match) {
+      showToast('AI nuk gjeti produkt te sigurt. Zgjidh nga lista.')
+      return
+    }
+
+    urgentToggle.checked = analysis.interpretation.urgency.shouldMarkUrgent
+    noteInput.value = analysis.interpretation.noteText
+    searchInput.value = analysis.interpretation.searchHint
+    if (topSearchInput) topSearchInput.value = analysis.interpretation.searchHint
+    await addSelectedProduct(analysis.match.id)
+    if (aiCommandInput) aiCommandInput.value = ''
+    if (aiFeedback) aiFeedback.innerHTML = ''
+  }
+
   function updateResults(): void {
     const q = searchInput.value.trim()
     if (!q) {
@@ -469,15 +524,6 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
 
     currentMatches = rankProductsForWorkerSearch(allProducts, q, 8)
     resultsDiv.innerHTML = renderResults(currentMatches)
-
-    const buttons = resultsDiv.querySelectorAll<HTMLButtonElement>('button.select-product')
-    buttons.forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.id
-        if (!id) return
-        void addSelectedProduct(id)
-      })
-    })
   }
 
   const applySearch = (value: string): void => {
@@ -503,6 +549,28 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
   searchInput.addEventListener('keydown', handleSearchEnter)
   topSearchInput?.addEventListener('input', () => applySearch(topSearchInput.value))
   topSearchInput?.addEventListener('keydown', handleSearchEnter)
+  resultsDiv.addEventListener('click', (event) => {
+    const btn = (event.target as HTMLElement).closest<HTMLButtonElement>('button.select-product')
+    const id = btn?.dataset.id
+    if (!id) return
+    void addSelectedProduct(id)
+  })
+  noteInput.addEventListener('input', () => {
+    if (!noteAi) return
+    const prediction = classifyUrgencyFromText(noteInput.value)
+    noteAi.innerHTML = renderUrgencyPrediction(prediction, 'shenim')
+  })
+  aiInterpretBtn?.addEventListener('click', () => {
+    void previewAiCommand(true)
+  })
+  aiAddBtn?.addEventListener('click', () => {
+    void addFromAiCommand()
+  })
+  aiCommandInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    void addFromAiCommand()
+  })
 
   getProducts().then((products) => {
     allProducts = products
