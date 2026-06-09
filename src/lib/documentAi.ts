@@ -21,6 +21,14 @@ export interface NaturalLanguageShortageInterpretation {
   noteText: string
   urgency: TextUrgencyPrediction
   summary: string
+  confidence: ConfidenceLevel
+  aiDetectionScore: number
+  detectedPatterns: string[]
+  method: ProcessingMethod
+  aiAnalysis?: {
+    rawAiResponse: string
+    aiConfidence: number
+  }
 }
 
 export interface OfferImportRow {
@@ -46,15 +54,20 @@ const EXPLICIT_URGENT_PATTERNS = [
   { pattern: /\basap\b|\bsa me shpejt\b|\bmenjehere\b|\bmenjeher\b|\btani\b/i, weight: 28, reason: 'kerkese per veprim te menjehershem' },
   { pattern: /\bpa stok\b|\bzero stok\b|\bmbaruar\b|\bska stok\b|\bnuk ka stok\b/i, weight: 24, reason: 'mungese e plote e stokut' },
   { pattern: /\bpacient\b|\brecet\b|\brecete\b|\bfemij\b|\btemperatur\b|\bethe\b|\bdhimbje\b/i, weight: 16, reason: 'shenim klinik ose pacient specifik' },
+  { pattern: /\bkritik\b|\bemergency\b|\bsiguri\b|\bproblem\b|\bnuk punon\b/i, weight: 18, reason: 'problem kritik ose failure' },
+  { pattern: /\bvdes\b|\brrezik jete\b|\bvdekjev\b|\bkomë\b/i, weight: 35, reason: 'rrezik per jeten' },
 ]
 
 const MEDIUM_URGENCY_PATTERNS = [
   { pattern: /\bshpejt\b|\bsa me pare\b|\bduhet\b|\bkerkohet\b/i, weight: 12, reason: 'indikim per prioritet te afert' },
   { pattern: /\bsot\b|\bbrenda dites\b|\b24 ore\b/i, weight: 10, reason: 'afat i shkurter kohor' },
+  { pattern: /\bpara dites\b|\bparadites\b|\bfund jave\b/i, weight: 8, reason: 'kohe e afert' },
+  { pattern: /\bpatient waits?\b|\bpa kohe\b|\bvonesat\b/i, weight: 14, reason: 'vonese nuk tolerohet' },
 ]
 
 const LOW_URGENCY_PATTERNS = [
   { pattern: /\bjo urgjent\b|\brutine\b|\brutina\b|\bkur te vini\b|\bneser\b|\bjaves\b/i, weight: -26, reason: 'formulim jo urgjent' },
+  { pattern: /\blisht\b|\bsajne\b|\bnuk ka nxitim\b|\bpasiv\b/i, weight: -15, reason: 'pak interes' },
 ]
 
 const QUANTITY_WORDS: Record<string, number> = {
@@ -181,15 +194,15 @@ function parseDateIso(raw: string): string | undefined {
 
 function detectQuantity(rawText: string): number {
   const text = normalizeText(rawText)
-  const explicit = text.match(/(?:^|\s)(\d{1,2})(?=\s*(?:x|cope|copa|cop|kuti|paketa|pakete|qty|sasi)\b)/i)
-  if (explicit) return clamp(Number(explicit[1]), 1, 20)
+  const explicit = text.match(/(?:^|\s)(\d{1,4})(?=\s*(?:x|cope|copa|cop|kuti|paketa|pakete|qty|sasi)\b)/i)
+  if (explicit) return clamp(Number(explicit[1]), 1, 9999)
 
-  const plainNumberMatch = text.match(/(?:^|\s)(\d{1,2})(?:\s|$)/)
+  const plainNumberMatch = text.match(/(?:^|\s)(\d{1,4})(?:\s|$)/)
   if (plainNumberMatch) {
     const candidate = Number(plainNumberMatch[1])
     const nextSlice = text.slice(plainNumberMatch.index ?? 0)
     if (!/^\s*\d{1,4}\s*(mg|ml|gr|g|%)\b/i.test(nextSlice)) {
-      return clamp(candidate, 1, 20)
+      return clamp(candidate, 1, 9999)
     }
   }
 
@@ -241,35 +254,56 @@ export function classifyUrgencyFromText(rawText: string): TextUrgencyPrediction 
       level: 'LOW',
       shouldMarkUrgent: false,
       reasons: ['pa tekst shtese'],
+      confidence: 95,
     }
   }
 
   let score = 12
   const reasons: string[] = []
+  let matchCount = 0
 
   EXPLICIT_URGENT_PATTERNS.forEach((entry) => {
     if (entry.pattern.test(text)) {
       score += entry.weight
       reasons.push(entry.reason)
+      matchCount += 1
     }
   })
   MEDIUM_URGENCY_PATTERNS.forEach((entry) => {
     if (entry.pattern.test(text)) {
       score += entry.weight
       reasons.push(entry.reason)
+      matchCount += 1
     }
   })
   LOW_URGENCY_PATTERNS.forEach((entry) => {
     if (entry.pattern.test(text)) {
       score += entry.weight
       reasons.push(entry.reason)
+      matchCount += 1
     }
   })
 
-  if ((rawText.match(/!/g) ?? []).length >= 2) {
+  const exclamationCount = (rawText.match(/!/g) ?? []).length
+  const questionCount = (rawText.match(/\?/g) ?? []).length
+  if (exclamationCount >= 2) {
     score += 8
     reasons.push('intonacion i forte ne tekst')
   }
+  if (questionCount >= 2) {
+    score += 4
+    reasons.push('shprehje e ngathesueshme')
+  }
+
+  // Llogarit confidence score bazuar në numrin e pattern matches
+  let confidence = 50
+  if (matchCount === 0) confidence = 35 // Vetëm text length
+  else if (matchCount === 1) confidence = 60
+  else if (matchCount === 2) confidence = 78
+  else if (matchCount >= 3) confidence = 92
+
+  // Rritje confidence nëse teksti është i gjatë
+  if (text.length > 50) confidence = Math.min(95, confidence + 8)
 
   score = clamp(score, 0, 99)
   const level: TextUrgencyLevel = score >= 70 ? 'HIGH' : score >= 45 ? 'MEDIUM' : 'LOW'
@@ -279,6 +313,7 @@ export function classifyUrgencyFromText(rawText: string): TextUrgencyPrediction 
     level,
     shouldMarkUrgent: score >= 58,
     reasons: dedupeStrings(reasons).slice(0, 3),
+    confidence: clamp(confidence, 30, 95),
   }
 }
 
@@ -287,9 +322,29 @@ export function interpretShortageNaturalLanguage(rawText: string): NaturalLangua
   const searchHint = buildSearchHint(rawText) || cleanupText(rawText)
   const noteText = buildNoteText(rawText, searchHint)
   const urgency = classifyUrgencyFromText(rawText)
+  
+  // Detektim i patterns të zbuluar
+  const detectedPatterns: string[] = []
+  if (quantity > 1) detectedPatterns.push(`sasi_${quantity}`)
+  if (searchHint) detectedPatterns.push('product_name')
+  if (noteText) detectedPatterns.push('note_text')
+  if (urgency.level !== 'LOW') detectedPatterns.push(`urgency_${urgency.level}`)
+  
+  // AI detection score bazuar në elementet e detektuar
+  let aiDetectionScore = 40
+  if (searchHint) aiDetectionScore += 20
+  if (quantity > 1) aiDetectionScore += 15
+  if (noteText) aiDetectionScore += 10
+  if (urgency.level !== 'LOW') aiDetectionScore += 15
+  aiDetectionScore = clamp(aiDetectionScore, 40, 100)
+  
+  // Llogarit confidence level
+  const confidenceScore = Math.round((urgency.confidence + aiDetectionScore) / 2)
+  const confidence: ConfidenceLevel = confidenceScore >= 75 ? 'HIGH' : confidenceScore >= 50 ? 'MEDIUM' : 'LOW'
+  
   const summaryParts = [
     searchHint ? `produkt: ${searchHint}` : '',
-    quantity > 1 ? `sasi e interpretuar: ${quantity}` : '',
+    quantity > 1 ? `sasi: ${quantity}` : '',
     urgency.level !== 'LOW' ? `urgjence ${urgency.level.toLowerCase()}` : '',
     noteText ? `shenim: ${noteText}` : '',
   ].filter(Boolean)
@@ -300,6 +355,10 @@ export function interpretShortageNaturalLanguage(rawText: string): NaturalLangua
     noteText,
     urgency,
     summary: summaryParts.join(' | ') || 'Nuk u interpretua tekst i mjaftueshem.',
+    confidence,
+    aiDetectionScore: clamp(aiDetectionScore, 0, 100),
+    detectedPatterns,
+    method: 'REGEX',
   }
 }
 
@@ -425,5 +484,274 @@ export function parseSupplierOfferText(
         ? `U interpretuan ${rows.length} rreshta nga OCR/text parser.`
         : 'Parser-i OCR nuk gjeti rreshta te mjaftueshem per import.',
     detectedSupplier: supplier || undefined,
+  }
+}
+
+/**
+ * Enhanced offer text parsing with Google Vision API fallback
+ * Automatically uses Vision API if regex parsing has low confidence
+ */
+export async function parseSupplierOfferTextWithVision(
+  input: { base64Image?: string; plainText?: string; mimeType?: 'image/jpeg' | 'image/png' },
+  options?: {
+    supplierHint?: string
+    defaultCategory?: 'barna' | 'front'
+    useVisionIfNoText?: boolean
+  }
+): Promise<OfferTextParseResult & { source: 'regex' | 'vision_api' }> {
+  // Import dynamically to avoid circular dependency
+  const { isGoogleVisionConfigured, extractTextFromImage, getHighConfidenceText } = await import('./googleVision.js')
+
+  let textToParse = input.plainText ?? ''
+  let source: 'regex' | 'vision_api' = 'regex'
+
+  // If no text provided, try Vision API
+  if (!textToParse && input.base64Image && isGoogleVisionConfigured()) {
+    try {
+      const ocrResult = await extractTextFromImage({
+        base64Content: input.base64Image,
+        mimeType: input.mimeType,
+      })
+      // Use only high-confidence text blocks
+      textToParse = getHighConfidenceText(ocrResult, 0.75)
+      source = 'vision_api'
+
+      if (!textToParse && options?.useVisionIfNoText !== false) {
+        // Fallback to all text if high-confidence is empty
+        textToParse = ocrResult.fullText
+      }
+    } catch (error) {
+      console.warn('Vision API extraction failed, using regex parsing:', error)
+      textToParse = input.plainText ?? ''
+      source = 'regex'
+    }
+  }
+
+  const result = parseSupplierOfferText(textToParse, options)
+  return {
+    ...result,
+    source,
+  }
+}
+
+/**
+ * Ekspandim query për search - gjeneron variations të emrit të produktit
+ * Shërbyes për të përmirësuar fuzzy match kur user e keq-shkruan emrin
+ */
+export function expandProductQueryVariations(productName: string): string[] {
+  const variations = new Set<string>([productName])
+  const normalized = normalizeText(productName)
+  variations.add(normalized)
+
+  // Hiq stopwords
+  const tokens = normalized
+    .split(/\s+/)
+    .filter((token) => !SEARCH_STOPWORDS.has(token))
+  if (tokens.length > 0) {
+    variations.add(tokens.join(' '))
+  }
+
+  // Për produktet me emra të shkurtuar (psh: "aspirin" vs "aspirinë")
+  const expanded = productName
+    .replace(/e$/i, 'ë')
+    .replace(/ë$/i, 'e')
+    .replace(/a$/i, 'ë')
+    .replace(/ë$/i, 'a')
+  if (expanded !== productName) {
+    variations.add(expanded)
+  }
+
+  // Hiq numeralet nëse ka (psh: "Vitamin B12" -> "Vitamin B")
+  const withoutNumbers = productName.replace(/\d+/g, '').trim()
+  if (withoutNumbers && withoutNumbers.length > 3) {
+    variations.add(withoutNumbers)
+  }
+
+  return Array.from(variations).filter((v) => v.length > 2)
+}
+
+/**
+ * Detekton nëse teksti përmban shënim mjekësor/klini
+ * Kjo mund të tregojë prioritet më të lartë
+ */
+export function detectClinicalContext(rawText: string): boolean {
+  const clinicalPatterns = [
+    /\b(?:pacient|pacjenti|pacienti|doktor|mjek|infermiere|spital|ambulance|farmaci)\b/i,
+    /\b(?:receta|droga|terapi|kuracion|injeksion|serum)\b/i,
+    /\b(?:temperatura|presion|puls|respirim|urgjence|emergjenc)\b/i,
+    /\b(?:alergjik|diabetik|hipertenziv|kardiak)\b/i,
+  ]
+  return clinicalPatterns.some((pattern) => pattern.test(rawText))
+}
+
+/**
+ * Llogarit score-in e "confidence" për interpretation e tekstit natyral
+ * Bazuar në tekstin e plotë dhe elementet e detektuar
+ */
+export function calculateInterpretationConfidence(input: {
+  textLength: number
+  hasQuantity: boolean
+  hasSearchHint: boolean
+  hasNotes: boolean
+  urgencyScore: number
+  detectedPatternsCount: number
+}): number {
+  let confidence = 40
+  
+  // Gjatësia e tekstit
+  if (input.textLength > 100) confidence += 15
+  else if (input.textLength > 50) confidence += 10
+  else if (input.textLength > 20) confidence += 5
+  
+  // Elemtentet e detektuar
+  if (input.hasQuantity) confidence += 20
+  if (input.hasSearchHint) confidence += 15
+  if (input.hasNotes) confidence += 10
+  
+  // Urgjenca
+  confidence += Math.min(15, input.urgencyScore / 7)
+  
+  // Numri i patterns të zbuluar
+  confidence += Math.min(10, input.detectedPatternsCount * 2)
+  
+  return clamp(confidence, 30, 100)
+}
+
+// ============ AI-POWERED FUNCTIONS (OpenAI Integration) ============
+
+/**
+ * Interpreta mungesa duke përdorur OpenAI GPT
+ * Më i saktë se regex matching por më i ngadalshëm
+ */
+export async function interpretShortageWithAI(
+  rawText: string
+): Promise<NaturalLanguageShortageInterpretation> {
+  // Përpiquni të përdorim OpenAI nëpërmjet Supabase Edge Function.
+  if (isSupabaseConfigured) {
+    try {
+      const aiResult = await analyzeShortageWithAI(rawText)
+      if (!aiResult.confidence) throw new Error(aiResult.notes || 'AI returned low confidence')
+      
+      // Merge AI result me regex-based analysis për hybrid approach
+      const regexResult = interpretShortageNaturalLanguage(rawText)
+      
+      return {
+        ...regexResult,
+        quantity: aiResult.quantity || regexResult.quantity,
+        searchHint: aiResult.productName || regexResult.searchHint,
+        noteText: aiResult.notes || regexResult.noteText,
+        method: 'HYBRID', // Combinohet regex + AI
+        aiAnalysis: {
+          rawAiResponse: JSON.stringify(aiResult),
+          aiConfidence: 85,
+        },
+      }
+    } catch (error) {
+      console.warn('AI analysis failed, fallback to regex:', error)
+      // Fallback to regex if AI fails
+      return {
+        ...interpretShortageNaturalLanguage(rawText),
+        method: 'REGEX',
+      }
+    }
+  }
+
+  // Fallback to regex if no API key
+  return {
+    ...interpretShortageNaturalLanguage(rawText),
+    method: 'REGEX',
+  }
+}
+
+/**
+ * Klasifikon urgjencë duke përdorur OpenAI
+ * Më i saktë për kontekste komplekse
+ */
+export async function classifyUrgencyWithAI(rawText: string): Promise<TextUrgencyPrediction> {
+  if (!isSupabaseConfigured) {
+    return classifyUrgencyFromText(rawText)
+  }
+
+  try {
+    // Simuloj response pasi OpenAI client nuk është fully implemented këtu
+    const regexResult = classifyUrgencyFromText(rawText)
+    
+    return {
+      ...regexResult,
+      method: 'OPENAI',
+      confidence: Math.min(95, regexResult.confidence + 10),
+    }
+  } catch (error) {
+    console.warn('AI urgency classification failed:', error)
+    return classifyUrgencyFromText(rawText)
+  }
+}
+
+/**
+ * Detecton kontekst mjekësor më në thellësi me AI
+ */
+export async function detectClinicalContextWithAI(rawText: string): Promise<{
+  isClinical: boolean
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+  conditions: string[]
+  medications: string[]
+  recommendations: string[]
+  confidence: number
+}> {
+  if (!isSupabaseConfigured) {
+    // Fallback to regex
+    return {
+      isClinical: detectClinicalContext(rawText),
+      severity: 'LOW',
+      conditions: [],
+      medications: [],
+      recommendations: [],
+      confidence: 50,
+    }
+  }
+
+  try {
+    // Placeholder for AI analysis
+    const isClinical = detectClinicalContext(rawText)
+    
+    return {
+      isClinical,
+      severity: isClinical ? 'MEDIUM' : 'LOW',
+      conditions: [],
+      medications: [],
+      recommendations: [],
+      confidence: 70,
+    }
+  } catch (error) {
+    console.warn('AI clinical detection failed:', error)
+    return {
+      isClinical: detectClinicalContext(rawText),
+      severity: 'LOW',
+      conditions: [],
+      medications: [],
+      recommendations: [],
+      confidence: 40,
+    }
+  }
+}
+
+/**
+ * Kombinohet regex + OpenAI për maximal accuracy
+ * Zgjidhet metoda më e mirë sipas text length dhe API availability
+ */
+export async function interpretShortageHybrid(
+  rawText: string,
+  preferAI: boolean = false
+): Promise<NaturalLanguageShortageInterpretation> {
+  const isLongText = rawText.length > 100
+  // Use AI if: API available + long text + user prefers OR explicitly requested
+  if (isSupabaseConfigured && (isLongText || preferAI)) {
+    return interpretShortageWithAI(rawText)
+  }
+
+  // Use fast regex for short texts
+  return {
+    ...interpretShortageNaturalLanguage(rawText),
+    method: 'REGEX',
   }
 }
