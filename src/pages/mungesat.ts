@@ -9,6 +9,7 @@ import {
 } from '../lib/data.js'
 import {
   classifyUrgencyFromText,
+  interpretShortageHybrid,
   interpretShortageNaturalLanguage,
   type NaturalLanguageShortageInterpretation,
   type TextUrgencyPrediction,
