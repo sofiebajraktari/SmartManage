@@ -155,6 +155,58 @@ export interface AiDeadStockAlert {
   action: string
 }
 
+export interface AiSupplierScorecard {
+  supplierName: string
+  score: number
+  riskLevel: AiRiskLevel
+  shortageCount: number
+  urgentCount: number
+  productCount: number
+  criticalProductCount: number
+  averageLeadTimeDays: number | null
+  alternativePressure: number
+  label: 'STABLE' | 'WATCH' | 'REVIEW'
+  reason: string
+  action: string
+}
+
+export interface AiAbcXyzProduct {
+  productId: string
+  name: string
+  supplierName: string
+  abcClass: 'A' | 'B' | 'C'
+  xyzClass: 'X' | 'Y' | 'Z'
+  combinedClass: string
+  totalSignals: number
+  variability: number
+  recommendedPolicy: string
+  riskLevel: AiRiskLevel
+}
+
+export interface AiDataQualityIssue {
+  id: string
+  category: 'CATALOG' | 'STOCK' | 'SUPPLIER' | 'PRICING' | 'DUPLICATE'
+  severity: AiRiskLevel
+  title: string
+  detail: string
+  productId?: string
+  productName?: string
+  supplierName?: string
+  action: string
+}
+
+export interface AiDecisionExplanation {
+  id: string
+  subject: string
+  decision: string
+  technique: 'FORECAST' | 'SAFETY_STOCK' | 'ABC_XYZ' | 'SUPPLIER_SCORE' | 'DATA_QUALITY'
+  confidence: number
+  riskLevel: AiRiskLevel
+  factors: string[]
+  formula: string
+  sensitivity: string
+}
+
 export interface DashboardInsights {
   shortageTrend: Array<{ date: string; count: number }>
   topSuppliers: Array<{ name: string; count: number }>
