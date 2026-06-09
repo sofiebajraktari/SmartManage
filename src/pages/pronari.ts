@@ -223,6 +223,10 @@ function buildEmptyDashboardInsights(days: 7 | 14 | 30): DashboardInsights {
     },
     stockWarnings: [],
     deadStockAlerts: [],
+    supplierScorecards: [],
+    abcXyzProducts: [],
+    dataQualityIssues: [],
+    explanations: [],
   }
 }
 
