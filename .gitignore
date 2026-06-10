@@ -9,3 +9,6 @@ node_modules/
 # Ndërtimet lokale (Render gjeneron `out` gjatë deploy)
 dist/
 out/
+
+# Supabase local link/version metadata
+supabase/.temp/

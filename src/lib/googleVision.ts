@@ -3,6 +3,8 @@
  * Supports offer scanning, prescription reading, inventory lists
  */
 
+import { isSupabaseConfigured, supabase } from './supabase.js'
+
 export interface GoogleVisionConfig {
   apiKey: string
   maxRetries?: number
@@ -49,7 +51,7 @@ export function initializeGoogleVision(apiKey: string): void {
  * Check if Vision API is configured
  */
 export function isGoogleVisionConfigured(): boolean {
-  return globalVisionConfig !== null && (globalVisionConfig.apiKey?.length ?? 0) > 0
+  return isSupabaseConfigured || (globalVisionConfig !== null && (globalVisionConfig.apiKey?.length ?? 0) > 0)
 }
 
 /**
@@ -60,6 +62,24 @@ export async function extractTextFromImage(imageData: {
   base64Content: string
   mimeType?: 'image/jpeg' | 'image/png' | 'application/pdf'
 }): Promise<DocumentOcrResult> {
+  if (isSupabaseConfigured) {
+    const { data, error } = await supabase.functions.invoke<DocumentOcrResult & { error?: string }>('vision-ocr', {
+      body: imageData,
+    })
+
+    if (error || data?.error) {
+      throw new Error(error?.message || data?.error || 'Google Vision gateway error')
+    }
+
+    return {
+      fullText: data?.fullText ?? '',
+      textBlocks: data?.textBlocks ?? [],
+      detectedLanguages: data?.detectedLanguages ?? [],
+      confidence: data?.confidence ?? 0,
+      processingTimeMs: data?.processingTimeMs ?? 0,
+    }
+  }
+
   if (!globalVisionConfig) {
     throw new Error('Google Vision API not initialized. Call initializeGoogleVision() first.')
   }

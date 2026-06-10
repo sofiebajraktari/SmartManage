@@ -7,8 +7,10 @@ Supabase Edge Function `openai-chat` si gateway:
 
 ```bash
 supabase secrets set OPENAI_API_KEY="sk-your-key-here"
-supabase secrets set OPENAI_MODEL="gpt-3.5-turbo"
+supabase secrets set OPENAI_MODEL="gpt-4o-mini"
+supabase secrets set GOOGLE_VISION_API_KEY="your-google-vision-api-key"
 supabase functions deploy openai-chat
+supabase functions deploy vision-ocr
 ```
 
 Ne `.env`/Render Static Site vendosen vetem `VITE_SUPABASE_URL` dhe
@@ -48,9 +50,10 @@ SmartManage tani ka **Real AI Integration** me:
 3. Shkarko JSON file
 4. Extrakto `private_key` dhe `project_id`
 
-### Step 5: Add to .env.local
+### Step 5: Add to Supabase secrets
 ```bash
-GOOGLE_VISION_API_KEY="your-json-key-content-here"
+supabase secrets set GOOGLE_VISION_API_KEY="your-google-vision-api-key"
+supabase functions deploy vision-ocr
 ```
 
 ### Usage
@@ -80,10 +83,10 @@ const result = await extractTextFromImage(imageBase64)
 2. Shto credit card
 3. Set monthly budget (recommended: $5-20)
 
-### Step 4: Add to .env.local
+### Step 4: Add to Supabase secrets
 ```bash
 OPENAI_API_KEY="sk-your-key-here"
-OPENAI_MODEL="gpt-3.5-turbo"
+OPENAI_MODEL="gpt-4o-mini"
 ```
 
 ### Usage
@@ -241,7 +244,7 @@ if (process.env.LOG_AI_USAGE) {
 
 | Problem | Solution |
 |---------|----------|
-| "API key not configured" | Add GOOGLE_VISION_API_KEY or OPENAI_API_KEY to .env.local |
+| "API key not configured" | Add GOOGLE_VISION_API_KEY or OPENAI_API_KEY to Supabase secrets and deploy the functions |
 | "Rate limit exceeded" | Wait 60s or use regex fallback |
 | "Invalid JSON response" | Retry, AI sometimes generates invalid JSON |
 | "Timeout (>30s)" | API is slow, fallback to regex |
@@ -260,9 +263,9 @@ if (process.env.LOG_AI_USAGE) {
 
 ### Secure Setup
 ```bash
-# .env.local (do not commit)
-OPENAI_API_KEY=sk-xxxxx
-GOOGLE_VISION_API_KEY=xxxxx
+# Supabase secrets
+supabase secrets set OPENAI_API_KEY=sk-xxxxx
+supabase secrets set GOOGLE_VISION_API_KEY=xxxxx
 
 # .gitignore
 .env.local

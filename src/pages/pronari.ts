@@ -5,6 +5,12 @@ import { getMockUser } from '../types.js'
 import { rankProductsForWorkerSearch } from '../lib/fuzzyProductSearch.js'
 import { recommendAlternativeSuppliers } from '../lib/inventoryAi.js'
 import {
+  parseSupplierOfferText,
+  parseSupplierOfferTextWithVision,
+  type OfferImportRow,
+} from '../lib/documentAi.js'
+import { parseSupplierOfferWithAI } from '../lib/openaiClient.js'
+import {
   addMungese,
   adminCreateUser,
   adminDeleteUser,
@@ -273,6 +279,7 @@ export function renderPronari(
     category: 'barna' | 'front'
     aliases: string[]
   }
+  type AiImportSource = 'file' | 'text' | 'vision_api'
   type TeamUser = {
     id: string
     email: string
@@ -1099,6 +1106,80 @@ export function renderPronari(
     const m = String(parsed.getMonth() + 1).padStart(2, '0')
     const d = String(parsed.getDate()).padStart(2, '0')
     return `${y}-${m}-${d}`
+  }
+
+  function toImportRow(row: OfferImportRow): ImportRow {
+    return {
+      name: row.name,
+      supplier: row.supplier,
+      producerName: row.producerName,
+      lastPaidPrice: row.lastPaidPrice,
+      lastPriceDate: row.lastPriceDate,
+      defaultOrderQty: row.defaultOrderQty,
+      category: row.category,
+      aliases: row.aliases ?? [],
+    }
+  }
+
+  function applyImportPreview(rows: ImportRow[], issues: string[], source: AiImportSource, label: string): void {
+    pendingImportRows = rows
+    pendingImportIssues = issues
+    lastImportFileName =
+      source === 'vision_api'
+        ? `${label} (Vision OCR)`
+        : source === 'text'
+          ? `${label} (AI text parser)`
+          : label
+    refreshUI()
+    showToast(`Preview gati: ${rows.length} valid, ${issues.length} me gabime.`)
+  }
+
+  async function parseOfferTextForImport(rawText: string, label = 'Tekst oferte'): Promise<void> {
+    const text = rawText.trim()
+    if (!text) {
+      showToast('Vendos tekstin e ofertës për AI import.')
+      return
+    }
+    try {
+      const aiParsed = await parseSupplierOfferWithAI(text)
+      const aiRows: ImportRow[] = aiParsed.products
+        .map((product) => ({
+          name: String(product.name ?? '').trim(),
+          supplier: String(aiParsed.supplier || '').trim(),
+          lastPaidPrice: Number.isFinite(Number(product.price)) ? Number(product.price) : undefined,
+          defaultOrderQty: Number.isFinite(Number(product.quantity)) ? Math.max(1, Math.round(Number(product.quantity))) : undefined,
+          category: 'barna' as const,
+          aliases: [],
+        }))
+        .filter((row) => row.name && row.supplier)
+      if (aiRows.length) {
+        applyImportPreview(aiRows, aiParsed.notes ? [aiParsed.notes] : [], 'text', label)
+        return
+      }
+    } catch {
+    }
+    const parsed = parseSupplierOfferText(text)
+    applyImportPreview(parsed.rows.map(toImportRow), parsed.issues, 'text', label)
+  }
+
+  async function parseOfferImageForImport(file: File): Promise<void> {
+    const mimeType =
+      file.type === 'image/png'
+        ? 'image/png'
+        : file.type === 'image/jpeg' || file.type === 'image/jpg'
+          ? 'image/jpeg'
+          : null
+    if (!mimeType) {
+      showToast('OCR pranon vetem PNG ose JPG.')
+      return
+    }
+    const { imageToBase64 } = await import('../lib/googleVision.js')
+    const base64Image = await imageToBase64(file)
+    const parsed = await parseSupplierOfferTextWithVision(
+      { base64Image, mimeType },
+      { useVisionIfNoText: true }
+    )
+    applyImportPreview(parsed.rows.map(toImportRow), parsed.issues, parsed.source === 'vision_api' ? 'vision_api' : 'text', file.name)
   }
 
   function renderImportPreview(): string {
@@ -4422,7 +4503,7 @@ export function renderPronari(
               <button type="button" id="btn-import-csv" class="hidden items-center gap-2 rounded-xl px-3 py-2 text-xs">
                 Ngarko file (Excel/CSV)
               </button>
-              <input id="import-csv-input" type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" class="hidden" />
+              <input id="import-csv-input" type="file" accept=".csv,.xlsx,.xls,.png,.jpg,.jpeg,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,image/png,image/jpeg" class="hidden" />
               <button type="button" id="btn-generate-orders" class="${currentSection === 'porosite' ? 'premium-btn-primary inline-flex' : 'hidden'} owner-generate-btn max-w-full flex-wrap items-center justify-center gap-2 rounded-xl px-3 py-2 text-[11px] font-semibold sm:px-4 sm:text-xs">
                 Gjenero porositë sipas furnitorit
               </button>
@@ -4687,10 +4768,25 @@ export function renderPronari(
                 </div>
 
                 <div id="owner-import-file-panel" class="${String(importTab) === 'file' ? 'space-y-3' : 'hidden space-y-3'}">
-                  <button type="button" data-action="open-import-picker" class="w-full rounded-xl border border-dashed border-blue-200 bg-blue-50/70 px-4 py-4 text-left hover:bg-blue-50">
-                    <div class="text-xs font-semibold text-blue-800">Zgjidh file për import (Excel/CSV)</div>
-                    <div class="mt-1 text-[11px] text-blue-700">Mbështetet: .csv, .xlsx, .xls</div>
-                  </button>
+                  <div class="grid gap-2 md:grid-cols-2">
+                    <button type="button" data-action="open-import-picker" class="w-full rounded-xl border border-dashed border-blue-200 bg-blue-50/70 px-4 py-4 text-left hover:bg-blue-50">
+                      <div class="text-xs font-semibold text-blue-800">Zgjidh file për import</div>
+                      <div class="mt-1 text-[11px] text-blue-700">Excel, CSV ose foto oferte JPG/PNG</div>
+                    </button>
+                    <div class="rounded-xl border border-sky-200 bg-sky-50/70 px-3 py-3">
+                      <div class="mb-2 flex items-center justify-between gap-2">
+                        <p class="text-xs font-semibold text-sky-800">AI import nga tekst</p>
+                        <button type="button" data-action="parse-offer-text" class="rounded-lg border border-sky-200 bg-white px-2 py-1 text-[11px] font-semibold text-sky-700 hover:bg-sky-100">
+                          Parse
+                        </button>
+                      </div>
+                      <textarea
+                        id="owner-offer-ai-text"
+                        class="premium-input min-h-24 w-full rounded-lg px-2.5 py-2 text-xs placeholder:text-slate-400 focus:outline-none"
+                        placeholder="Ngjit ofertën: furnitor, produkt, cmim, sasi..."
+                      ></textarea>
+                    </div>
+                  </div>
                   <div id="owner-import-preview" class="mb-1"></div>
                 </div>
               </div>
@@ -5351,6 +5447,22 @@ export function renderPronari(
 
     const filename = file.name.toLocaleLowerCase('sq-AL')
     const isExcel = filename.endsWith('.xlsx') || filename.endsWith('.xls')
+    const isImage =
+      filename.endsWith('.png') ||
+      filename.endsWith('.jpg') ||
+      filename.endsWith('.jpeg') ||
+      file.type === 'image/png' ||
+      file.type === 'image/jpeg'
+
+    if (isImage) {
+      try {
+        await parseOfferImageForImport(file)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'OCR i ofertës dështoi.'
+        showToast(msg.length > 120 ? `${msg.slice(0, 117)}...` : msg)
+      }
+      return
+    }
 
     if (isExcel) {
       try {
@@ -5467,10 +5579,7 @@ export function renderPronari(
       importInput.value = ''
       return
     }
-    pendingImportRows = rows
-    pendingImportIssues = issues
-    refreshUI()
-    showToast(`Preview gati: ${rows.length} valid, ${issues.length} me gabime.`)
+    applyImportPreview(rows, issues, 'file', file.name)
   })
 
   const handleContainerClick = async (event: MouseEvent): Promise<void> => {
@@ -5626,6 +5735,12 @@ export function renderPronari(
 
     if (action === 'open-import-picker') {
       importInput?.click()
+      return
+    }
+
+    if (action === 'parse-offer-text') {
+      const textInput = document.getElementById('owner-offer-ai-text') as HTMLTextAreaElement | null
+      await parseOfferTextForImport(textInput?.value ?? '')
       return
     }
 

@@ -25,9 +25,17 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json()
+    if (body?.health === true) {
+      return json({
+        ok: true,
+        service: 'openai-chat',
+        hasOpenAIKey: true,
+        model: Deno.env.get('OPENAI_MODEL') || 'gpt-4o-mini',
+      })
+    }
     const messages = validateMessages(body.messages)
     const model =
-      typeof body.model === 'string' && body.model.trim() ? body.model : Deno.env.get('OPENAI_MODEL') || 'gpt-3.5-turbo'
+      typeof body.model === 'string' && body.model.trim() ? body.model : Deno.env.get('OPENAI_MODEL') || 'gpt-4o-mini'
     const temperature = typeof body.temperature === 'number' ? body.temperature : 0.3
     const maxTokens = typeof body.max_tokens === 'number' ? body.max_tokens : 1024
 

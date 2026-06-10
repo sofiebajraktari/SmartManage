@@ -22,6 +22,7 @@ import {
   type AiOverview,
   type AiRiskLevel,
 } from './inventoryAi.js'
+import { classifyUrgencyFromText } from './documentAi.js'
 
 export interface OwnerOrderLine {
   productName: string
@@ -2478,6 +2479,18 @@ export async function addMungese(productId: string, urgent: boolean, note: strin
     p_note: note,
   })
   if (error) throw error
+
+  const urgency = classifyUrgencyFromText(`${urgent ? 'urgjent ' : ''}${note}`)
+  const historyResult = await recordShortageHistory({
+    productId,
+    shortageQty: 1,
+    urgencyLevel: urgent ? 'HIGH' : urgency.level,
+    urgencyScore: urgent ? Math.max(urgency.score, 85) : urgency.score,
+    notes: note,
+  })
+  if (!historyResult.ok) {
+    console.warn('AI shortage history was not recorded:', historyResult.message)
+  }
 }
 
 export async function getTodayShortages(

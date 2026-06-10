@@ -3,7 +3,7 @@ export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 export type ProcessingMethod = 'REGEX' | 'OPENAI' | 'HYBRID'
 
 // Import AI clients
-import { analyzeShortageWithAI } from './openaiClient.js'
+import { analyzeShortageWithAI, classifyUrgencyWithOpenAI, detectClinicalContextWithOpenAI } from './openaiClient.js'
 import { isSupabaseConfigured } from './supabase.js'
 
 export interface TextUrgencyPrediction {
@@ -53,13 +53,13 @@ const EXPLICIT_URGENT_PATTERNS = [
   { pattern: /\burgjent\b|\burgent\b|\bemergjenc/i, weight: 40, reason: 'fjale eksplicite urgjence' },
   { pattern: /\basap\b|\bsa me shpejt\b|\bmenjehere\b|\bmenjeher\b|\btani\b/i, weight: 28, reason: 'kerkese per veprim te menjehershem' },
   { pattern: /\bpa stok\b|\bzero stok\b|\bmbaruar\b|\bska stok\b|\bnuk ka stok\b/i, weight: 24, reason: 'mungese e plote e stokut' },
-  { pattern: /\bpacient\b|\brecet\b|\brecete\b|\bfemij\b|\btemperatur\b|\bethe\b|\bdhimbje\b/i, weight: 16, reason: 'shenim klinik ose pacient specifik' },
+  { pattern: /\bpacient\w*\b|\brecet\w*\b|\bfemij\w*\b|\btemperatur\w*\b|\bethe\b|\bdhimbje\b/i, weight: 16, reason: 'shenim klinik ose pacient specifik' },
   { pattern: /\bkritik\b|\bemergency\b|\bsiguri\b|\bproblem\b|\bnuk punon\b/i, weight: 18, reason: 'problem kritik ose failure' },
   { pattern: /\bvdes\b|\brrezik jete\b|\bvdekjev\b|\bkomë\b/i, weight: 35, reason: 'rrezik per jeten' },
 ]
 
 const MEDIUM_URGENCY_PATTERNS = [
-  { pattern: /\bshpejt\b|\bsa me pare\b|\bduhet\b|\bkerkohet\b/i, weight: 12, reason: 'indikim per prioritet te afert' },
+  { pattern: /\bshpejt\b|\bsa me pare\b|\bduhet\b|\bduhen\b|\bkerkohet\b/i, weight: 12, reason: 'indikim per prioritet te afert' },
   { pattern: /\bsot\b|\bbrenda dites\b|\b24 ore\b/i, weight: 10, reason: 'afat i shkurter kohor' },
   { pattern: /\bpara dites\b|\bparadites\b|\bfund jave\b/i, weight: 8, reason: 'kohe e afert' },
   { pattern: /\bpatient waits?\b|\bpa kohe\b|\bvonesat\b/i, weight: 14, reason: 'vonese nuk tolerohet' },
@@ -100,6 +100,7 @@ const SEARCH_STOPWORDS = new Set([
   'pa',
   'stok',
   'duhet',
+  'duhen',
   'kerkohet',
   'shpejt',
   'sa',
@@ -390,7 +391,7 @@ function parseOfferLine(line: string, supplier: string): OfferImportRow | null {
   const normalized = normalizeText(cleanLine)
   if (!cleanLine || cleanLine.length < 4) return null
   if (!/[a-z]/i.test(normalized)) return null
-  if (/^(supplier|furnitor|distributor|cmimi|price|total|date|data)\b/i.test(normalized)) return null
+  if (/^(supplier|furnitor(?:i)?|distributor(?:i)?|cmimi|price|total|date|data)\b/i.test(normalized)) return null
 
   const priceMatches = [...cleanLine.matchAll(/\b(\d+[.,]\d{1,2})\s*(?:eur|euro|€)?\b/gi)]
   const lastPaidPrice = priceMatches.length
@@ -402,7 +403,7 @@ function parseOfferLine(line: string, supplier: string): OfferImportRow | null {
     cleanLine.match(/\b(?:moq|min(?:imum)?|qty|sasi|cop(?:e|a)?|kuti|paket(?:e|a)?)\s*[:x-]?\s*(\d{1,3})\b/i) ??
     cleanLine.match(/\bx\s*(\d{1,3})\b/i)
   const defaultOrderQty = qtyMatch ? parsePositiveInteger(qtyMatch[1]) : undefined
-  const producerMatch = cleanLine.match(/\b(?:producer|prodhues(?:i)?)\s*[:\-]\s*([^,;]+)/i)
+  const producerMatch = cleanLine.match(/\b(?:producer|prodhues(?:i)?)\s*(?::|-|\s)\s*([^,;]+)/i)
   const producerName = producerMatch?.[1] ? cleanupText(producerMatch[1]) : undefined
 
   let name = cleanLine
@@ -411,7 +412,7 @@ function parseOfferLine(line: string, supplier: string): OfferImportRow | null {
     .replace(/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b/g, ' ')
     .replace(/\b(?:moq|min(?:imum)?|qty|sasi|cop(?:e|a)?|kuti|paket(?:e|a)?)\s*[:x-]?\s*\d{1,3}\b/gi, ' ')
     .replace(/\bx\s*\d{1,3}\b/gi, ' ')
-    .replace(/\b(?:producer|prodhues(?:i)?)\s*[:\-]\s*[^,;]+/gi, ' ')
+    .replace(/\b(?:producer|prodhues(?:i)?)\s*(?::|-|\s)\s*[^,;]+/gi, ' ')
   name = cleanupText(name)
 
   if (producerName && name.toLocaleLowerCase('sq-AL').includes(producerName.toLocaleLowerCase('sq-AL'))) {
@@ -464,7 +465,9 @@ export function parseSupplierOfferText(
   lines.forEach((line, index) => {
     const parsed = parseOfferLine(line, supplier || 'OCR Import')
     if (!parsed) {
-      if (/[a-z]/i.test(normalizeText(line)) && line.length >= 6) {
+      const normalizedLine = normalizeText(line)
+      const isKnownHeader = /^(supplier|furnitor(?:i)?|distributor(?:i)?|cmimi|price|total|date|data)\b/i.test(normalizedLine)
+      if (!isKnownHeader && /[a-z]/i.test(normalizedLine) && line.length >= 6) {
         issues.push(`OCR rreshti ${index + 1}: nuk u interpretua sakte â€œ${line}â€`)
       }
       return
@@ -673,13 +676,17 @@ export async function classifyUrgencyWithAI(rawText: string): Promise<TextUrgenc
   }
 
   try {
-    // Simuloj response pasi OpenAI client nuk është fully implemented këtu
     const regexResult = classifyUrgencyFromText(rawText)
+    const aiResult = await classifyUrgencyWithOpenAI(rawText)
     
     return {
       ...regexResult,
+      score: aiResult.score,
+      level: aiResult.level,
+      shouldMarkUrgent: aiResult.shouldMarkUrgent,
+      reasons: aiResult.reasons.length ? aiResult.reasons : regexResult.reasons,
       method: 'OPENAI',
-      confidence: Math.min(95, regexResult.confidence + 10),
+      confidence: aiResult.confidence,
     }
   } catch (error) {
     console.warn('AI urgency classification failed:', error)
@@ -711,17 +718,7 @@ export async function detectClinicalContextWithAI(rawText: string): Promise<{
   }
 
   try {
-    // Placeholder for AI analysis
-    const isClinical = detectClinicalContext(rawText)
-    
-    return {
-      isClinical,
-      severity: isClinical ? 'MEDIUM' : 'LOW',
-      conditions: [],
-      medications: [],
-      recommendations: [],
-      confidence: 70,
-    }
+    return await detectClinicalContextWithOpenAI(rawText)
   } catch (error) {
     console.warn('AI clinical detection failed:', error)
     return {
