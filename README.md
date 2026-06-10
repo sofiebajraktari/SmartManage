@@ -25,6 +25,18 @@ Stack-u kryesor:
 - te dhenat jane te ndara sipas kompanise
 - `public.mungesat` perdoret me `Realtime`
 
+## Analiza dhe statistikat
+
+Per kapitujt e rezultateve, projekti mund te paraqese statistika krahasuese per barnatore te ndryshme, si numri mujor i mungesave, koha mesatare e regjistrimit, urgjenca e mungesave dhe saktesia e parashikimit AI. Keto tabela mund te eksportohen ose te ripunohen ne Excel per grafike si column chart, bar chart dhe pie chart.
+
+Shembuj metrikash te dobishme:
+
+- mungesat mujore sipas barnatores
+- koha e regjistrimit para dhe pas SmartManage
+- porosite e realizuara ne kohe nga furnitoret
+- produktet nen minimum para dhe pas perdorimit te reorder point dinamik
+- saktesia e parashikimit AI per 7 ditet e ardhshme
+
 ## Rruget kryesore
 
 Aplikacioni perdor hash routing.
