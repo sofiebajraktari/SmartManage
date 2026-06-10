@@ -261,14 +261,14 @@ export function renderMungesat(container: HTMLElement, _routeSection = 'mungesat
               <div class="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <p class="text-xs font-semibold uppercase tracking-wide text-sky-800">AI Quick Entry</p>
-                  <p class="text-[11px] text-sky-700">Shkruaj tekst natyral si: "Paracetamol urgent per temperature, 2 cope".</p>
+                  <p class="text-[11px] text-sky-700">Shkruaj produktin, urgjencen dhe sasine ne nje fjali te shkurter.</p>
                 </div>
                 <div class="flex items-center gap-2">
                   <button type="button" id="worker-ai-interpret" class="rounded-lg border border-sky-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100">AI interpreto</button>
                   <button type="button" id="worker-ai-add" class="premium-btn-primary rounded-lg px-2.5 py-1.5 text-[11px] font-semibold">Shto me AI</button>
                 </div>
               </div>
-              <input id="worker-ai-command" type="text" autocomplete="off" placeholder="p.sh. Brufen urgent per pacient, 3 cope" class="premium-input mt-2 w-full rounded-lg px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none" aria-label="AI quick entry" />
+              <input id="worker-ai-command" type="text" autocomplete="off" placeholder="p.sh. Brufen urgent per pacient, 3 cope" class="premium-input mt-2 w-full rounded-lg px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none" aria-label="AI quick entry per shtim te shpejte te mungeses" />
               <div id="worker-ai-feedback" class="mt-2 text-[11px] text-slate-600"></div>
             </div>
             <div class="worker-entry-controls flex flex-col sm:flex-row sm:items-center gap-2 text-sm text-slate-700">
