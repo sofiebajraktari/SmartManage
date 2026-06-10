@@ -1,3 +1,6 @@
+-- Shton pragjet minimale te stokut dhe historikun e levizjeve te inventarit.
+-- Keto fusha perdoren nga dashboard-i dhe rekomandimet AI per stokun.
+
 alter table public.products
   add column if not exists min_stock integer default 0,
   add column if not exists reorder_point integer default 0;
