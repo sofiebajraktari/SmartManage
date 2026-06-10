@@ -89,16 +89,19 @@ alter table public.demand_forecast_archive enable row level security;
 
 -- ===== 5) RLS Policies =====
 -- shortage_history
+drop policy if exists "shortage_history_select_company" on public.shortage_history;
 create policy "shortage_history_select_company"
   on public.shortage_history for select
   to authenticated
   using (company_id = public.current_company_id());
 
+drop policy if exists "shortage_history_insert_company" on public.shortage_history;
 create policy "shortage_history_insert_company"
   on public.shortage_history for insert
   to authenticated
   with check (company_id = public.current_company_id());
 
+drop policy if exists "shortage_history_update_owner" on public.shortage_history;
 create policy "shortage_history_update_owner"
   on public.shortage_history for update
   to authenticated
@@ -106,16 +109,19 @@ create policy "shortage_history_update_owner"
   with check (public.is_owner() and company_id = public.current_company_id());
 
 -- supplier_performance
+drop policy if exists "supplier_performance_select_company" on public.supplier_performance;
 create policy "supplier_performance_select_company"
   on public.supplier_performance for select
   to authenticated
   using (company_id = public.current_company_id());
 
+drop policy if exists "supplier_performance_insert_owner" on public.supplier_performance;
 create policy "supplier_performance_insert_owner"
   on public.supplier_performance for insert
   to authenticated
   with check (public.is_owner() and company_id = public.current_company_id());
 
+drop policy if exists "supplier_performance_update_owner" on public.supplier_performance;
 create policy "supplier_performance_update_owner"
   on public.supplier_performance for update
   to authenticated
@@ -123,11 +129,13 @@ create policy "supplier_performance_update_owner"
   with check (public.is_owner() and company_id = public.current_company_id());
 
 -- demand_forecast_archive
+drop policy if exists "demand_forecast_select_company" on public.demand_forecast_archive;
 create policy "demand_forecast_select_company"
   on public.demand_forecast_archive for select
   to authenticated
   using (company_id = public.current_company_id());
 
+drop policy if exists "demand_forecast_insert_authenticated" on public.demand_forecast_archive;
 create policy "demand_forecast_insert_authenticated"
   on public.demand_forecast_archive for insert
   to authenticated
